@@ -441,7 +441,12 @@ if __name__ == "__main__":
     parser.add_argument("--agent_func_path", type=str, default=None, help="Agent script path")
 
     # Custom dataset
-    parser.add_argument("--prompt_data", type=str, default=None, help="HF dataset name or path")
+    parser.add_argument(
+        "--prompt_data",
+        type=str,
+        default=None,
+        help="HF dataset name or path. Supports path[@data_dir][#config], e.g. openai/gsm8k#main",
+    )
     parser.add_argument(
         "--prompt_data_probs",
         type=str,

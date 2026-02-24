@@ -16,6 +16,20 @@ from openrlhf.utils.agent import AgentExecutorBase, SingleTurnAgentExecutor
 from .utils import get_bundle_indices, ray_noset_visible_devices
 
 
+def _ensure_transformers_vllm_tokenizer_compat():
+    """Backfill attrs removed in newer transformers but still used by older vLLM."""
+    try:
+        from transformers import PreTrainedTokenizerBase
+    except Exception:
+        return
+
+    if not hasattr(PreTrainedTokenizerBase, "all_special_tokens_extended"):
+        PreTrainedTokenizerBase.all_special_tokens_extended = property(lambda self: self.all_special_tokens)
+
+
+_ensure_transformers_vllm_tokenizer_compat()
+
+
 def _load_agent_executor(agent_func_path: str) -> AgentExecutorBase:
     assert agent_func_path.endswith(".py"), "Agent path must be a Python file"
     import importlib.util

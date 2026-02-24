@@ -7,6 +7,23 @@ def exist_and_not_none(d, key):
     return key in d and not d[key] is None
 
 
+def parse_dataset_spec(dataset_spec: str):
+    """Parse dataset spec in the form: path[@data_dir][#config]."""
+    dataset_spec = dataset_spec.strip()
+    config = None
+    data_dir = None
+
+    if "#" in dataset_spec:
+        dataset_spec, config = dataset_spec.split("#", 1)
+        config = config.strip() or None
+
+    if "@" in dataset_spec:
+        dataset_spec, data_dir = dataset_spec.split("@", 1)
+        data_dir = data_dir.strip() or None
+
+    return dataset_spec.strip(), data_dir, config
+
+
 def blending_datasets(
     datasets,
     probabilities=None,
@@ -33,11 +50,8 @@ def blending_datasets(
 
     data_list = []
     for i, dataset in enumerate(datasets):
-        dataset = dataset.strip()
-        strategy.print(f"dataset: {dataset}")
-
-        data_dir = dataset.split("@")[1].strip() if "@" in dataset else None
-        dataset = dataset.split("@")[0].strip()
+        dataset, data_dir, config = parse_dataset_spec(dataset)
+        strategy.print(f"dataset: {dataset}, data_dir: {data_dir}, config: {config}")
         dataset_basename = os.path.basename(dataset)
 
         ext = os.path.splitext(dataset)[-1]
@@ -45,7 +59,7 @@ def blending_datasets(
         if ext == ".py" or (
             os.path.isdir(dataset) and os.path.exists(os.path.join(dataset, f"{dataset_basename}.py"))
         ):
-            data = load_dataset(dataset, trust_remote_code=True)
+            data = load_dataset(dataset, name=config, trust_remote_code=True)
             strategy.print(f"loaded {dataset} with python script")
         # local text file
         elif ext in [".json", ".jsonl", ".csv", ".parquet", ".arrow"]:
@@ -61,7 +75,7 @@ def blending_datasets(
                 strategy.print(f"loaded {dataset} from disk")
             except Exception as e:
                 strategy.print(f"failed to load {dataset} from disk: {e}")
-                data = load_dataset(dataset, data_dir=data_dir)
+                data = load_dataset(dataset, name=config, data_dir=data_dir)
                 strategy.print(f"loaded {dataset} from files")
         # remote/local folder or common file
         elif strategy.args.use_ms:
@@ -70,7 +84,7 @@ def blending_datasets(
             namespace, dataset = dataset.split("/")
             data = MsDataset.load(dataset, namespace=namespace)
         else:
-            data = load_dataset(dataset, data_dir=data_dir)
+            data = load_dataset(dataset, name=config, data_dir=data_dir)
             strategy.print(f"loaded {dataset} from files")
 
         # Select dataset
