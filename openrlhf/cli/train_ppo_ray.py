@@ -541,11 +541,11 @@ if __name__ == "__main__":
             args.rollout_max_tokens_per_gpu = args.train_max_tokens_per_gpu
 
     if args.packing_samples:
-        if "flash_attention" not in args.attn_implementation:
+        if "flash_attention" not in args.attn_implementation and args.attn_implementation != "sdpa":
             print(
-                "[Warning] Please use --attn_implementation with flash_attention to accelerate when --packing_samples is enabled."
+                "[Warning] Please use --attn_implementation with flash_attention or sdpa to accelerate when --packing_samples is enabled."
             )
-            args.attn_implementation = "flash_attention_2"
+            args.attn_implementation = "sdpa"
         assert args.vllm_num_engines > 0, "Only support `--packing_samples` with vLLM."
 
     if args.vllm_enable_sleep and not args.colocate_all_models:

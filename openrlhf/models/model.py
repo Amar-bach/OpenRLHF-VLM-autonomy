@@ -115,6 +115,9 @@ def get_llm_for_sequence_regression(
     # LoRA
     if lora_rank > 0:
         model.enable_input_require_grads()
+        # nargs="*" wraps "all-linear" in a list, but PEFT expects a plain string
+        if isinstance(target_modules, list) and len(target_modules) == 1:
+            target_modules = target_modules[0]
         lora_config = LoraConfig(
             r=lora_rank,
             lora_alpha=lora_alpha,

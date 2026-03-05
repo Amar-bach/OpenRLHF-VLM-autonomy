@@ -318,7 +318,13 @@ class ActorPPOTrainer(ABC):
 
         torch.cuda.empty_cache()
         model = self.actor.model.module
-        count, num_params = 0, len(list(model.named_parameters()))
+
+        # Merge LoRA weights into base model before broadcasting to vLLM
+        is_peft = hasattr(model, "merge_adapter")
+        if is_peft:
+            model.merge_adapter()
+
+        count, num_params = 0, len([n for n, _ in model.named_parameters() if "lora_" not in n])
 
         def _broadcast_param(param, count, num_params):
             use_ray = getattr(self.strategy.args, "vllm_sync_with_ray", False)
@@ -368,6 +374,13 @@ class ActorPPOTrainer(ABC):
             torch_dist_barrier_and_cuda_sync()
 
         for name, param in model.named_parameters():
+            # Skip LoRA-specific parameters (vLLM doesn't have them)
+            if "lora_" in name or "lora_magnitude_vector" in name:
+                continue
+            # Strip PEFT prefixes so vLLM can find the parameter
+            if name.startswith("base_model.model."):
+                name = name[len("base_model.model."):]
+            name = name.replace(".base_layer.", ".")
             count += 1  # empty_cache at last param
 
             # broadcast
@@ -387,6 +400,10 @@ class ActorPPOTrainer(ABC):
                 else:
                     with deepspeed.zero.GatheredParameters([param], enabled=self.strategy.args.zero_stage == 3):
                         _handle_cuda_ipc(param, count, num_params)
+
+        # Unmerge LoRA weights after broadcasting so training continues on LoRA params
+        if is_peft:
+            model.unmerge_adapter()
 
         if cache_reset_refs:
             ray.get(cache_reset_refs)

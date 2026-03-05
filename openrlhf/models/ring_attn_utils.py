@@ -1,7 +1,11 @@
 import torch
 import torch.distributed as dist
-from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
-from flash_attn.utils.distributed import all_gather
+
+try:
+    from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
+    from flash_attn.utils.distributed import all_gather
+except ImportError:
+    index_first_axis = pad_input = rearrange = unpad_input = all_gather = None
 
 RING_ATTN_GROUP = None
 

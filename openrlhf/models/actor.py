@@ -102,6 +102,9 @@ class Actor(nn.Module):
             if lora_rank > 0:
                 # https://github.com/huggingface/peft/issues/137
                 self.model.enable_input_require_grads()
+                # nargs="*" wraps "all-linear" in a list, but PEFT expects a plain string
+                if isinstance(target_modules, list) and len(target_modules) == 1:
+                    target_modules = target_modules[0]
                 lora_config = LoraConfig(
                     task_type=TaskType.CAUSAL_LM,
                     r=lora_rank,
