@@ -36,8 +36,8 @@ ROLLOUT_ARGS=(
    --prompt_data ${DATASET_PATH}
    --input_key prompt
    --label_key label
-   --prompt_max_len 10240
-   --generate_max_len 64000
+   --max_len 74240
+   --max_new_tokens 64000
    --apply_chat_template
    --packing_samples
 
@@ -60,6 +60,7 @@ ROLLOUT_ARGS=(
 
 ENGINE_ARGS=(
    --async_train
+   --partial_rollout
 
    --ref_num_nodes 1
    --ref_num_gpus_per_node 4
@@ -67,7 +68,7 @@ ENGINE_ARGS=(
    --actor_num_gpus_per_node 4
    --vllm_num_engines 2
    --vllm_tensor_parallel_size 2
-   --vllm_gpu_memory_utilization 0.7
+   --vllm_gpu_memory_utilization 0.95
    --colocate_all_models
    --deepspeed_enable_sleep
    --vllm_sync_backend nccl

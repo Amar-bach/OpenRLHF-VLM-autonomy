@@ -1,6 +1,7 @@
 # Adapted from
 # https://github.com/skypilot-org/skypilot/blob/86dc0f6283a335e4aa37b3c10716f90999f48ab6/sky/sky_logging.py
 """Logging configuration for vLLM."""
+
 import logging
 import os
 import sys
@@ -130,7 +131,8 @@ class TensorboardLogger:
 
     def log_eval(self, global_step: int, logs_dict: Dict[str, Any]) -> None:
         for k, v in logs_dict.items():
-            self.writer.add_scalar(f"eval/{k}", v, global_step)
+            if v is not None:
+                self.writer.add_scalar(f"eval/{k}", v, global_step)
 
     def close(self) -> None:
         self.writer.close()

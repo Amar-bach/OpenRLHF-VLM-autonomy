@@ -63,8 +63,8 @@ python3 -m openrlhf.cli.train_ppo_ray \
    --save_path ${SAVE_PATH} \
    --ckpt_path "${SAVE_PATH}/ckpt" \
    --save_hf_ckpt \
-   --lora_rank 8 \
-   --lora_alpha 16 \
+   --lora_rank 1 \
+   --lora_alpha 2 \
    --target_modules all-linear \
    --micro_train_batch_size 8 \
    --train_batch_size 128 \
@@ -79,7 +79,7 @@ python3 -m openrlhf.cli.train_ppo_ray \
    --zero_stage 2 \
    --eps_clip_low_high 0.2 0.28 \
    --param_dtype bf16 \
-   --actor_learning_rate 5e-5 \
+   --actor_learning_rate 5e-4 \
    --critic_learning_rate 7.07e-6 \
    --init_kl_coef 0.05 \
    --prompt_data ${DATASET_PATH} \
@@ -98,7 +98,7 @@ python3 -m openrlhf.cli.train_ppo_ray \
    --use_wandb ${WANDB_API_KEY} \
    --wandb_project openrlhf_gsm8k \
    --wandb_group qwen25_1p5b_lora \
-   --wandb_run_name ppo_qwen25_1p5b_gsm8k_lora_r8_$(date +%m%dT%H%M)
+   --wandb_run_name ppo_qwen25_1p5b_gsm8k_lora_r1_lre-4_$(date +%m%dT%H%M)
 
 TRAIN_EXIT_CODE=$?
 

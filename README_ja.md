@@ -127,7 +127,7 @@ OpenRLHFは**token-in-token-outエージェント実行を通じて生成と学�
       ┌──────────┴──────────┐   ┌─────────┴──────────┐
       ↓                     ↓   ↓                    ↓
   標準RLHF          カスタム報酬    マルチステップ      外部環境
-  (ワンショット生成)    関数          推論           (NeMo Gym)
+  (ワンショット生成)    関数          推論           (OpenAI Agent Server)
       ↓                     ↓           ↓                ↓
       └─────────────────────┴───────────┴────────────────┘
                               │
@@ -217,7 +217,7 @@ OpenRLHFは、エージェントベースの柔軟性を備えた完全なRLHF�
 - 環境フィードバックとのマルチステップ相互作用
 - すべてのRLアルゴリズムで動作
 - [カスタムエージェント関数](./examples/scripts/train_reinforce_baseline_ray_agent_async.sh)（`--agent_func_path`）
-- NeMo Gym統合：NeMo Gym rollouts と統合する agent executor の例として `examples/python/agent_func_nemogym_executor.py` を参照
+- OpenAI互換サーバー：vLLMをローカルOpenAIサーバーとしてラップするagent executorの例として `examples/python/agent_func_openai_server_executor.py` を参照
 - スループット向上のための[非同期パイプライン](./examples/test_scripts/train_reinforce_llama_ray_async.sh)（`--async_train`）
 
 </details>
@@ -232,13 +232,7 @@ OpenRLHFは、エージェントベースの柔軟性を備えた完全なRLHF�
 |------|-----------|------|
 | **SFT** | [train_sft.sh](./examples/scripts/train_sft.sh) | パッキング付き教師あり微調整 |
 | **DPO/IPO/cDPO** | [train_dpo_llama.sh](./examples/scripts/train_dpo_llama.sh) | 直接選好最適化 |
-| **KTO** | [train_kto_llama.sh](./examples/scripts/train_kto_llama.sh) | Kahneman-Tversky最適化 |
-| **反復DPO** | [train_iterative_dpo.sh](./examples/scripts/train_iterative_dpo.sh) | オンライン選好学習 |
 | **報酬モデル** | [train_rm.sh](./examples/scripts/train_rm.sh) | 報酬モデルの学習 |
-| **プロセス報酬モデル** | [train_prm_mistral.sh](./examples/scripts/train_prm_mistral.sh) | ステップバイステップ報酬モデル |
-| **リジェクションサンプリング** | [train_rejection_sampling_llama.sh](./examples/scripts/train_rejection_sampling_llama.sh) | Best-of-Nサンプリング |
-| **条件付きSFT** | [train_conditional.sh](./examples/scripts/train_conditional.sh) | 品質条件付き学習 |
-| **蒸留** | [train_knowledge_distillation.sh](./examples/scripts/train_knowledge_distillation.sh) | 知識転移 |
 
 </details>
 
@@ -288,14 +282,14 @@ OpenRLHFは、エージェントベースの柔軟性を備えた完全なRLHF�
 ```bash
 # 1. Dockerコンテナを起動
 docker run --runtime=nvidia -it --rm --shm-size="10g" --cap-add=SYS_ADMIN \
-  -v $PWD:/openrlhf nvcr.io/nvidia/pytorch:25.11-py3bash
+  -v $PWD:/openrlhf nvcr.io/nvidia/pytorch:25.11-py3 bash
 
 # 2. 競合するパッケージをクリーンアップ
 sudo pip uninstall xgboost transformer_engine flash_attn pynvml -y
 
 # 3. OpenRLHFをインストール（1つ選択）
 pip install openrlhf                    # 基本
-pip install openrlhf[vllm]              # + vLLM 0.15.0（推奨）
+pip install openrlhf[vllm]              # + vLLM 0.19.0（推奨）
 pip install openrlhf[vllm_latest]       # + 最新vLLM
 pip install openrlhf[vllm,ring,liger]   # + すべての最適化
 ```
@@ -309,7 +303,7 @@ pip install -e .
 ```
 
 > [!TIP]
-> 最高のパフォーマンスのために**vLLM 0.15.0+**を推奨します。[Dockerfiles](./dockerfile/)と[Nvidia-Dockerインストールスクリプト](./examples/scripts/nvidia_docker_install.sh)を参照してください。
+> 最高のパフォーマンスのために**vLLM 0.19.0+**を推奨します。[Dockerfiles](./dockerfile/)と[Nvidia-Dockerインストールスクリプト](./examples/scripts/nvidia_docker_install.sh)を参照してください。
 
 詳細な使用方法、データセット準備、学習例については、英語版READMEの該当セクションを参照してください。
 

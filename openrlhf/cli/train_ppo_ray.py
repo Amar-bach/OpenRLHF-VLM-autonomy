@@ -1,4 +1,5 @@
 import argparse
+import os
 from datetime import datetime
 
 import ray
@@ -18,7 +19,17 @@ from openrlhf.utils import get_strategy
 def train(args):
     # initialize ray if not initialized
     if not ray.is_initialized():
-        ray.init(runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN"}})
+        # Use os.environ.get() to respect user-set values (e.g. NCCL_DEBUG=INFO via
+        # ray job submit --runtime-env-json), falling back to sensible defaults.
+        ray.init(
+            runtime_env={
+                "env_vars": {
+                    "TOKENIZERS_PARALLELISM": os.environ.get("TOKENIZERS_PARALLELISM", "true"),
+                    "NCCL_DEBUG": os.environ.get("NCCL_DEBUG", "WARN"),
+                    "RAY_ENABLE_ZERO_COPY_TORCH_TENSORS": os.environ.get("RAY_ENABLE_ZERO_COPY_TORCH_TENSORS", "1"),
+                }
+            }
+        )
 
     # configure strategy
     strategy = get_strategy(args)
@@ -41,7 +52,7 @@ def train(args):
     # init vLLM engine for text generation
     vllm_engines = None
     if args.vllm_num_engines is not None and args.vllm_num_engines > 0:
-        max_len = args.max_len if args.max_len else args.prompt_max_len + args.generate_max_len
+        max_len = args.max_len
         if args.colocate_all_models and not args.async_train:
             assert (
                 args.actor_num_nodes * args.actor_num_gpus_per_node
@@ -67,6 +78,7 @@ def train(args):
             "processed_logprobs" if args.enable_vllm_is_correction else None,
             agent_func_path=args.agent_func_path,
             remote_rm_url=args.remote_rm_url,
+            max_images_per_prompt=getattr(args, "max_images_per_prompt", 0),
         )
 
     actor_model = RayActorGroup(
@@ -146,9 +158,8 @@ def train(args):
         vllm_engines,
         # generate kwargs
         do_sample=True,
-        prompt_max_len=args.prompt_max_len,
-        max_new_tokens=args.generate_max_len,
-        max_length=args.max_len,
+        max_len=max_len,
+        max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         top_p=args.top_p,
     )
@@ -260,6 +271,14 @@ if __name__ == "__main__":
     # Async training using ray
     parser.add_argument("--async_train", action="store_true", default=False, help="Enable async training")
     parser.add_argument("--async_queue_size", type=int, default=1, help="Queue size for async sampler<->trainer")
+    parser.add_argument(
+        "--partial_rollout",
+        action="store_true",
+        default=False,
+        help="Enable partial rollout in async mode. Uses vLLM pause/resume for weight sync "
+        "instead of locking, allowing generation to overlap with training. "
+        "In-flight samples may contain tokens from both old and new weights.",
+    )
 
     # Checkpoints
     parser.add_argument("--eval_steps", type=int, default=-1)
@@ -269,8 +288,15 @@ if __name__ == "__main__":
     parser.add_argument("--save_hf_ckpt", action="store_true", default=False)
     parser.add_argument("--disable_ds_ckpt", action="store_true", default=False)
     parser.add_argument("--max_ckpt_num", type=int, default=3)
-    parser.add_argument("--max_ckpt_mem", type=int, default=1e8)
+    parser.add_argument("--max_ckpt_mem", type=float, default=float("inf"))
     parser.add_argument("--load_checkpoint", action="store_true", default=False)
+    parser.add_argument(
+        "--best_metric_key",
+        type=str,
+        default="",
+        help="Eval metric key for best checkpoint saving (e.g., eval_default_pass1). "
+        "Empty string auto-detects first pass1 metric. Set to 'none' to disable best checkpoint saving.",
+    )
     parser.add_argument(
         "--use_ds_universal_ckpt", action="store_true", help="Use deepspeed universal checkpoint", default=False
     )
@@ -305,6 +331,12 @@ if __name__ == "__main__":
     parser.add_argument("--gradient_checkpointing_use_reentrant", action="store_true", default=False)
     parser.add_argument("--disable_fast_tokenizer", action="store_true", default=False)
     parser.add_argument(
+        "--dataloader_num_workers",
+        type=int,
+        default=0,
+        help="Number of dataloader workers for IO (for Ray training, ensure sufficient CPU resources per actor)",
+    )
+    parser.add_argument(
         "--deepspeed_enable_sleep",
         action="store_true",
         default=False,
@@ -334,11 +366,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--vllm_generate_batch_size", type=int, default=None, help="Batch size for vLLM generating samples"
     )
-    parser.add_argument("--micro_rollout_batch_size", type=int, default=8)
+    parser.add_argument("--micro_rollout_batch_size", type=int, default=1)
     parser.add_argument("--max_epochs", type=int, default=1)
-    parser.add_argument("--prompt_max_len", type=int, default=1024, help="Max tokens for each prompt")
-    parser.add_argument("--generate_max_len", type=int, default=1024, help="Max tokens to generate in PPO")
-    parser.add_argument("--max_len", type=int, default=None, help="deprecated max_len")
+    parser.add_argument("--max_len", type=int, default=2048, help="Max total sequence length (prompt + response)")
+    parser.add_argument(
+        "--max_new_tokens",
+        type=int,
+        default=None,
+        help="Max tokens to generate per sample. If None, dynamically computed as max_len - prompt_len per sample.",
+    )
     parser.add_argument("--max_samples", type=int, default=1e8, help="Max number of samples")
     parser.add_argument("--max_norm", type=float, default=1.0, help="Gradient clipping")
     parser.add_argument("--l2", type=float, default=0.0, help="weight decay loss")
@@ -349,7 +385,7 @@ if __name__ == "__main__":
     parser.add_argument("--value_clip", type=float, default=0.5, help="PPO value clip range")
     parser.add_argument("--lambd", type=float, default=1, help="PPO GAE lambd")
     parser.add_argument("--gamma", type=float, default=1, help="PPO GAE gamma")
-    parser.add_argument("--micro_train_batch_size", type=int, default=4, help="batch size per GPU")
+    parser.add_argument("--micro_train_batch_size", type=int, default=1, help="batch size per GPU")
     parser.add_argument("--train_batch_size", type=int, default=128, help="Global training batch size")
     parser.add_argument("--normalize_reward", action="store_true", default=False, help="Enable Reward Normalization")
     parser.add_argument("--top_p", type=float, default=1.0)
@@ -416,8 +452,8 @@ if __name__ == "__main__":
         "--stop_properly_penalty_coef",
         type=float,
         default=None,
-        help="Penalty coefficient [0,1] for truncated samples (finish_reason='length'). "
-        "Truncated sample rewards are scaled by this coefficient to encourage proper stopping.",
+        help="Penalty for truncated samples (finish_reason='length'). "
+        "If >= 0: multiplicative scaling [0,1]. If < 0: fixed reward override (e.g., -0.5).",
     )
 
     # Context Parallel
@@ -485,6 +521,18 @@ if __name__ == "__main__":
         "--dynamic_filtering_reward_range", nargs=2, default=(0, 1), type=float, help="Dynamic filtering rewards range"
     )
 
+    # VLM (Vision-Language Model) parameters
+    parser.add_argument("--image_key", type=str, default="images", help="Dataset key for image paths/URLs")
+    parser.add_argument(
+        "--max_images_per_prompt", type=int, default=0, help="Max images per prompt for vLLM (0 = text-only)"
+    )
+    parser.add_argument(
+        "--freeze_visual_encoder",
+        action="store_true",
+        default=False,
+        help="Freeze vision encoder weights (only train language model). Reduces memory and weight sync overhead.",
+    )
+
     # TensorBoard parameters
     parser.add_argument("--use_tensorboard", type=str, default=None, help="TensorBoard logging path")
 
@@ -513,6 +561,18 @@ if __name__ == "__main__":
 
     if args.advantage_estimator in ["rloo", "reinforce_baseline", "group_norm"]:
         assert args.n_samples_per_prompt > 1, f"{args.advantage_estimator} requires n_samples_per_prompt > 1"
+
+    # VLM constraints: critic and packing_samples are not supported
+    if args.max_images_per_prompt > 0:
+        assert args.critic_pretrain is None, (
+            "VLM training does not support critic model. "
+            "Use --advantage_estimator other than 'gae' (e.g., reinforce_baseline, rloo, group_norm)."
+        )
+        assert not args.packing_samples, (
+            "VLM training does not support --packing_samples. "
+            "Packing collapses the batch dimension, breaking alignment between image tokens and pixel_values. "
+            "VLM models also require model-computed position_ids (e.g., M-RoPE) which is incompatible with packing."
+        )
 
     if args.remote_rm_url:
         args.remote_rm_url = args.remote_rm_url.split(",")
@@ -558,6 +618,9 @@ if __name__ == "__main__":
     if args.async_train:
         assert not args.vllm_enable_sleep, "Async RLHF is not supported with --vllm_enable_sleep."
 
+    if args.partial_rollout:
+        assert args.async_train, "--partial_rollout requires --async_train."
+
     if args.eval_dataset:
         assert args.remote_rm_url, "`--eval_dataset` is only supported with `--remote_rm_url`."
 
@@ -571,6 +634,12 @@ if __name__ == "__main__":
     # Set vLLM generate_batch_size to rollout_batch_size if not specified
     if not args.vllm_generate_batch_size:
         args.vllm_generate_batch_size = args.rollout_batch_size
+
+    if args.vllm_generate_batch_size > args.rollout_batch_size:
+        assert args.async_train, (
+            "--vllm_generate_batch_size > --rollout_batch_size requires --async_train "
+            "(over-sampling needs async queue to buffer extra batches)."
+        )
 
     if args.dynamic_filtering:
         assert (

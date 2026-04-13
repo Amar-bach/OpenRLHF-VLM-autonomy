@@ -14,7 +14,7 @@
 # project settings
 OPENRLHF_PATH=<OPENRLHF_ROOT_PATH>
 MOUNT="$OPENRLHF_PATH:/openrlhf,$HOME/.cache:/root/.cache"
-IMAGE_NAME="vllm/vllm-openai:v0.15.1-cu130"
+IMAGE_NAME="nvcr.io/nvidia/pytorch:25.11-py3"
 RAY_VERSION=2.12.0
 
 JOBLOG="$(realpath .)/train_ppo_llama_ray-$SLURM_JOB_ID.log"
@@ -77,8 +77,7 @@ srun --overlap --nodes=1 --ntasks=1 -w "$node_1" --container-image="$IMAGE_NAME"
     --rollout_batch_size 1024 \
     --max_samples 100000 \
     --max_epochs 1 \
-    --prompt_max_len 1024 \
-    --generate_max_len 1024 \
+    --max_len 2048 \
     --zero_stage 3 \
     --param_dtype bf16 \
     --actor_learning_rate 5e-7 \

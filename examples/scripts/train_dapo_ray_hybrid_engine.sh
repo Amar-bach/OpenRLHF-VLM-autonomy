@@ -29,9 +29,8 @@ python3 -m openrlhf.cli.train_ppo_ray \
    --rollout_batch_size 128 \
    --n_samples_per_prompt 8 \
    --max_epochs 1 \
-   --prompt_max_len 1024 \
+   --max_len 2048 \
    --max_samples 20000 \
-   --generate_max_len 1024 \
    --zero_stage 3 \
    --param_dtype bf16 \
    --actor_learning_rate 5e-7 \

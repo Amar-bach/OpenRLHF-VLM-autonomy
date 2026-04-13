@@ -54,8 +54,8 @@ python3 -m openrlhf.cli.train_ppo_ray \
    --n_samples_per_prompt 16 \
    --use_dynamic_batch \
    --num_episodes 100 \
-   --prompt_max_len 1024 \
-   --generate_max_len 8192 \
+   --max_len 9216 \
+   --max_new_tokens 8192 \
    --zero_stage 3 \
    --param_dtype bf16 \
    --actor_learning_rate 1e-6 \
@@ -92,7 +92,7 @@ python3 -m openrlhf.cli.train_ppo_ray \
 # Length Penalty (Two options, can be used together):
 #
 # Option 1: Overlong Penalty (Scheduled Cosine Length Penalty based on response length)
-#   --overlong_buffer_len 6144: Buffer length before max, penalty starts when response > (generate_max_len - overlong_buffer_len)
+#   --overlong_buffer_len 6144: Buffer length before max, penalty starts when response > (max_new_tokens - overlong_buffer_len)
 #   --overlong_penalty_factor 1.0: Maximum penalty factor for overlong outputs
 #   Formula: penalty = -min(exceed_len, buffer_len) / buffer_len * penalty_factor
 #

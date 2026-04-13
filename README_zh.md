@@ -53,6 +53,7 @@ OpenRLHF 是**首个**结合 **Ray + vLLM 分布式架构**与**统一 Agent 设
 <details>
 <summary>展开新闻</summary>
 
+- [2026/4] OpenRLHF 0.10 新增 **VLM（视觉语言模型）RLHF 支持** — 支持 Qwen3.5 等 VLM 的端到端图像输入训练。训练脚本：[train_vlm_math_hybrid_engine.sh](./examples/scripts/train_vlm_math_hybrid_engine.sh)
 - [2026/2] [ProRL V2](https://developer.nvidia.com/blog/scaling-llm-reinforcement-learning-with-prolonged-training-using-prorl-v2/) 使用 REINFORCE++-baseline 通过长期 RL 训练训练最先进的 1.5B 推理模型。训练脚本：[train_prorlv2_math_hybrid_engine.sh](./examples/scripts/train_prorlv2_math_hybrid_engine.sh)
 - [2025/10] [ScaleRL](https://arxiv.org/abs/2510.13786) 验证了 REINFORCE++-baseline 在大规模训练场景中的有效性。发布 [REINFORCE++ PPT](https://docs.google.com/presentation/d/1stieP_3PM1z4Hq1YWR3GywFkxcHEAlstXMaS23KlGN4)
 - [2025/6] [Magistral](https://mistral.ai/static/research/magistral.pdf) 使用与 REINFORCE++-baseline 非常相似的方法训练推理模型。
@@ -127,7 +128,7 @@ OpenRLHF **通过 token-in-token-out 的 Agent 执行统一生成和训练**，�
       ┌──────────┴──────────┐   ┌─────────┴──────────┐
       ↓                     ↓   ↓                    ↓
   标准 RLHF          自定义奖励    多步推理        外部环境
-  (单次生成)           函数                      (NeMo Gym)
+  (单次生成)           函数                      (OpenAI Agent Server)
       ↓                     ↓           ↓                ↓
       └─────────────────────┴───────────┴────────────────┘
                               │
@@ -214,7 +215,7 @@ OpenRLHF 提供完整的 RLHF 流程，具有基于 Agent 的灵活性：
 - 与环境反馈的多步交互
 - 适用于所有 RL 算法
 - [自定义 Agent 函数](./examples/scripts/train_reinforce_baseline_ray_agent_async.sh)（`--agent_func_path`）
-- NeMo Gym 集成：参见 `examples/python/agent_func_nemogym_executor.py`（集成 NeMo Gym rollout 的 agent executor 示例）
+- OpenAI 兼容服务器：参见 `examples/python/agent_func_openai_server_executor.py`（将 vLLM 封装为本地 OpenAI 服务器的 agent executor 示例）
 - 异步流水线（`--async_train`）提高吞吐量：[train_reinforce_baseline_ray_agent_async.sh](./examples/scripts/train_reinforce_baseline_ray_agent_async.sh)
 
 </details>
@@ -228,13 +229,7 @@ OpenRLHF 提供完整的 RLHF 流程，具有基于 Agent 的灵活性：
 |------|------|------|
 | **SFT** | [train_sft.sh](./examples/scripts/train_sft.sh) | 带打包的监督微调 |
 | **DPO/IPO/cDPO** | [train_dpo_llama.sh](./examples/scripts/train_dpo_llama.sh) | 直接偏好优化 |
-| **KTO** | [train_kto_llama.sh](./examples/scripts/train_kto_llama.sh) | Kahneman-Tversky 优化 |
-| **迭代 DPO** | [train_iterative_dpo.sh](./examples/scripts/train_iterative_dpo.sh) | 在线偏好学习 |
 | **奖励模型** | [train_rm.sh](./examples/scripts/train_rm.sh) | 训练奖励模型 |
-| **过程奖励模型** | [train_prm_mistral.sh](./examples/scripts/train_prm_mistral.sh) | 逐步奖励模型 |
-| **拒绝采样** | [train_rejection_sampling_llama.sh](./examples/scripts/train_rejection_sampling_llama.sh) | Best-of-N 采样 |
-| **条件 SFT** | [train_conditional.sh](./examples/scripts/train_conditional.sh) | 质量条件训练 |
-| **蒸馏** | [train_knowledge_distillation.sh](./examples/scripts/train_knowledge_distillation.sh) | 知识迁移 |
 
 </details>
 
@@ -259,6 +254,7 @@ OpenRLHF 提供完整的 RLHF 流程，具有基于 Agent 的灵活性：
 - 使用 [SLURM](./examples/scripts/train_ppo_ray_slurm.sh) 的多节点训练
 
 **模型支持**
+- [VLM（视觉语言模型）](./examples/scripts/train_vlm_math_hybrid_engine.sh) — 已测试 Qwen3.5（`--image_key`、`--max_images_per_prompt`）
 - [LoRA/QLoRA](./examples/scripts/train_sft_mixtral_lora.sh)（`--lora_rank`、`--load_in_4bit`）
 - [专家混合（MoE）](./examples/test_scripts/train_sft_moe.sh)（`--aux_loss_coef`）
 - FlashAttention（`--attn_implementation`）
@@ -283,14 +279,14 @@ OpenRLHF 提供完整的 RLHF 流程，具有基于 Agent 的灵活性：
 ```bash
 # 1. 启动 Docker 容器
 docker run --runtime=nvidia -it --rm --shm-size="10g" --cap-add=SYS_ADMIN \
-  -v $PWD:/openrlhf nvcr.io/nvidia/pytorch:25.11-py3bash
+  -v $PWD:/openrlhf nvcr.io/nvidia/pytorch:25.11-py3 bash
 
 # 2. 清理冲突包
 sudo pip uninstall xgboost transformer_engine flash_attn pynvml -y
 
 # 3. 安装 OpenRLHF（选择一个）
 pip install openrlhf                    # 基础
-pip install openrlhf[vllm]              # + vLLM 0.15.0（推荐）
+pip install openrlhf[vllm]              # + vLLM 0.19.0（推荐）
 pip install openrlhf[vllm_latest]       # + 最新 vLLM
 pip install openrlhf[vllm,ring,liger]   # + 所有优化
 ```
@@ -304,7 +300,7 @@ pip install -e .
 ```
 
 > [!TIP]
-> 我们推荐 **vLLM 0.15.0+** 以获得最佳性能。参见 [Dockerfiles](./dockerfile/) 和 [Nvidia-Docker 安装脚本](./examples/scripts/nvidia_docker_install.sh)。
+> 我们推荐 **vLLM 0.19.0+** 以获得最佳性能。参见 [Dockerfiles](./dockerfile/) 和 [Nvidia-Docker 安装脚本](./examples/scripts/nvidia_docker_install.sh)。
 
 ### 准备数据集
 
@@ -669,7 +665,7 @@ ray job submit --address="http://127.0.0.1:8265" \
 - 单轮：[train_ppo_ray_hybrid_engine.sh](./examples/scripts/train_ppo_ray_hybrid_engine.sh)
 - 自定义奖励：[train_ppo_with_reward_fn.sh](./examples/scripts/train_ppo_with_reward_fn.sh)
 - 多轮：[train_reinforce_baseline_ray_agent_async.sh](./examples/scripts/train_reinforce_baseline_ray_agent_async.sh)
-- NeMo Gym：`examples/python/agent_func_nemogym_executor.py`
+- OpenAI Agent Server：`examples/python/agent_func_openai_server_executor.py`
 
 ---
 

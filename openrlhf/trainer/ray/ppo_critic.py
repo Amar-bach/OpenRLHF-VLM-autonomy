@@ -12,7 +12,7 @@ from transformers.trainer import get_scheduler
 
 from openrlhf.models import ValueLoss, get_llm_for_sequence_regression
 from openrlhf.models.utils import masked_mean
-from openrlhf.trainer.ppo_utils.experience_maker import Experience
+from openrlhf.trainer.ppo_utils.experience import Experience
 from openrlhf.utils import get_tokenizer
 from openrlhf.utils.deepspeed import DeepspeedStrategy
 from openrlhf.utils.deepspeed.deepspeed_utils import offload_deepspeed_states, reload_deepspeed_states
@@ -65,15 +65,15 @@ class CriticPPOTrainer(ABC):
         if self.args.use_dynamic_batch:
             self.replay_buffer.setup_dynamic_batch(self.strategy)
 
-        not_shuffle = (
-            self.strategy.ring_attn_group is not None
-            or self.args.ds_tensor_parallel_size > 1
-            or self.args.use_dynamic_batch
+        should_shuffle = (
+            self.strategy.ring_attn_group is None
+            and self.args.ds_tensor_parallel_size <= 1
+            and not self.args.use_dynamic_batch
         )
         dataloader = DataLoader(
             self.replay_buffer,
             batch_size=self.replay_buffer.sample_batch_size,
-            shuffle=not not_shuffle,
+            shuffle=should_shuffle,
             drop_last=True,
             pin_memory=self.dataloader_pin_memory,
             collate_fn=self.replay_buffer.collate_fn,
@@ -156,6 +156,7 @@ class CriticPPOTrainer(ABC):
             "critic_loss": critic_loss.detach().item(),
             "values": masked_mean(values, experience.action_mask).detach().item(),
             "critic_lr": self.critic_scheduler.get_last_lr()[0],
+            "critic_grad_norm": self.strategy.get_grad_norm(self.critic),
         }
         return status
 
@@ -219,8 +220,8 @@ class CriticModelActor(BaseModelActor):
         )
 
         # load checkpoint
-        if args.load_checkpoint and os.path.exists(os.path.join(args.ckpt_path, "_actor")):
-            ckpt_path = os.path.join(args.ckpt_path, "_critic")
+        ckpt_path = os.path.join(args.ckpt_path, "_critic")
+        if args.load_checkpoint and os.path.exists(ckpt_path):
             strategy.print(f"Loading the checkpoint: {ckpt_path}")
             strategy.load_ckpt(self.critic, ckpt_path)
 
@@ -283,11 +284,17 @@ class CriticModelActor(BaseModelActor):
             args.save_path + "_critic",
         )
 
-    def save_checkpoint(self, tag):
+    def save_checkpoint(self, tag, metric_value=None, metric_key=None):
         args = self.strategy.args
         if not self.disable_ds_ckpt:
             self.strategy.save_ckpt(
-                self.critic, os.path.join(args.ckpt_path, "_critic"), tag, args.max_ckpt_num, args.max_ckpt_mem
+                self.critic,
+                os.path.join(args.ckpt_path, "_critic"),
+                tag,
+                args.max_ckpt_num,
+                args.max_ckpt_mem,
+                metric_value=metric_value,
+                metric_key=metric_key,
             )
 
     def reload_states(self):

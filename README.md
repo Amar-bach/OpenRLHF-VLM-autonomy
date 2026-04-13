@@ -53,6 +53,7 @@ OpenRLHF is **the first** high-performance, production-ready open-source RLHF fr
 <details>
 <summary>Show News</summary>
 
+- [2026/4] OpenRLHF 0.10 adds **VLM (Vision-Language Model) RLHF support** — train VLMs like Qwen3.5 with image inputs end-to-end. Training script: [train_vlm_math_hybrid_engine.sh](./examples/scripts/train_vlm_math_hybrid_engine.sh)
 - [2026/2] [ProRL V2](https://developer.nvidia.com/blog/scaling-llm-reinforcement-learning-with-prolonged-training-using-prorl-v2/) uses REINFORCE++-baseline to train a state-of-the-art 1.5B reasoning model with prolonged RL training. Training script: [train_prorlv2_math_hybrid_engine.sh](./examples/scripts/train_prorlv2_math_hybrid_engine.sh)
 - [2025/10] [ScaleRL](https://arxiv.org/abs/2510.13786) validates the effectiveness of REINFORCE++-baseline in large-scale training scenarios. Releases [REINFORCE++ slides](https://docs.google.com/presentation/d/1stieP_3PM1z4Hq1YWR3GywFkxcHEAlstXMaS23KlGN4)
 - [2025/6] [Magistral](https://mistral.ai/static/research/magistral.pdf) uses the method quite similar to REINFORCE++-baseline to train the reasoning models.
@@ -127,7 +128,7 @@ OpenRLHF **unifies generation and training through token-in-token-out agent exec
       ┌──────────┴──────────┐   ┌─────────┴──────────┐
       ↓                     ↓   ↓                    ↓
   Standard RLHF      Custom Reward   Multi-Step    External Env
-  (One-shot gen)     Function      Reasoning     (NeMo Gym)
+  (One-shot gen)     Function      Reasoning     (OpenAI Agent Server)
       ↓                     ↓           ↓                ↓
       └─────────────────────┴───────────┴────────────────┘
                               │
@@ -213,7 +214,7 @@ OpenRLHF provides a complete RLHF pipeline with agent-based flexibility:
 - Multi-step interactions with environment feedback
 - Works with all RL algorithms
 - [Custom agent functions](./examples/scripts/train_reinforce_baseline_ray_agent_async.sh) (`--agent_func_path`)
-- NeMo Gym integration: see `examples/python/agent_func_nemogym_executor.py` for an agent executor that integrates NeMo Gym rollouts
+- OpenAI-compatible server: see `examples/python/agent_func_openai_server_executor.py` for an agent executor that wraps vLLM as a local OpenAI Agent Server
 - Async pipeline (`--async_train`) for higher throughput: [train_reinforce_baseline_ray_agent_async.sh](./examples/scripts/train_reinforce_baseline_ray_agent_async.sh)
 
 </details>
@@ -227,13 +228,7 @@ OpenRLHF provides a complete RLHF pipeline with agent-based flexibility:
 |--------|--------|-------------|
 | **SFT** | [train_sft.sh](./examples/scripts/train_sft.sh) | Supervised fine-tuning with packing |
 | **DPO/IPO/cDPO** | [train_dpo_llama.sh](./examples/scripts/train_dpo_llama.sh) | Direct preference optimization |
-| **KTO** | [train_kto_llama.sh](./examples/scripts/train_kto_llama.sh) | Kahneman-Tversky optimization |
-| **Iterative DPO** | [train_iterative_dpo.sh](./examples/scripts/train_iterative_dpo.sh) | Online preference learning |
 | **Reward Model** | [train_rm.sh](./examples/scripts/train_rm.sh) | Train reward models |
-| **Process RM** | [train_prm_mistral.sh](./examples/scripts/train_prm_mistral.sh) | Step-by-step reward models |
-| **Rejection Sampling** | [train_rejection_sampling_llama.sh](./examples/scripts/train_rejection_sampling_llama.sh) | Best-of-N sampling |
-| **Conditional SFT** | [train_conditional.sh](./examples/scripts/train_conditional.sh) | Quality-conditioned training |
-| **Distillation** | [train_knowledge_distillation.sh](./examples/scripts/train_knowledge_distillation.sh) | Knowledge transfer |
 
 </details>
 
@@ -258,6 +253,7 @@ OpenRLHF provides a complete RLHF pipeline with agent-based flexibility:
 - Multi-node training with [SLURM](./examples/scripts/train_ppo_ray_slurm.sh)
 
 **Model Support**
+- [VLM (Vision-Language Models)](./examples/scripts/train_vlm_math_hybrid_engine.sh) — tested with Qwen3.5 (`--image_key`, `--max_images_per_prompt`)
 - [LoRA/QLoRA](./examples/scripts/train_sft_mixtral_lora.sh) (`--lora_rank`, `--load_in_4bit`)
 - [Mixture of Experts (MoE)](./examples/test_scripts/train_sft_moe.sh) (`--aux_loss_coef`)
 - FlashAttention (`--attn_implementation`)
@@ -282,14 +278,14 @@ OpenRLHF provides a complete RLHF pipeline with agent-based flexibility:
 ```bash
 # 1. Launch Docker container
 docker run --runtime=nvidia -it --rm --shm-size="10g" --cap-add=SYS_ADMIN \
-  -v $PWD:/openrlhf nvcr.io/nvidia/pytorch:25.11-py3bash
+  -v $PWD:/openrlhf nvcr.io/nvidia/pytorch:25.11-py3 bash
 
 # 2. Clean conflicting packages
 sudo pip uninstall xgboost transformer_engine flash_attn pynvml -y
 
 # 3. Install OpenRLHF (choose one)
 pip install openrlhf                    # Basic
-pip install openrlhf[vllm]              # + vLLM 0.15.0 (recommended)
+pip install openrlhf[vllm]              # + vLLM 0.19.0 (recommended)
 pip install openrlhf[vllm_latest]       # + Latest vLLM
 pip install openrlhf[vllm,ring,liger]   # + All optimizations
 ```
@@ -303,7 +299,7 @@ pip install -e .
 ```
 
 > [!TIP]
-> We recommend **vLLM 0.15.0+** for best performance. See [Dockerfiles](./dockerfile/) and [Nvidia-Docker Install Script](./examples/scripts/nvidia_docker_install.sh).
+> We recommend **vLLM 0.19.0+** for best performance. See [Dockerfiles](./dockerfile/) and [Nvidia-Docker Install Script](./examples/scripts/nvidia_docker_install.sh).
 
 ### Prepare Datasets
 
@@ -654,6 +650,7 @@ ray job submit --address="http://127.0.0.1:8265" \
 **Async Pipeline** (for higher throughput):
 - Enable: `--async_train`
 - Buffer size: `--async_queue_size 1` (larger = more off-policy, default 1)
+- Partial rollout: `--partial_rollout` — uses vLLM pause/resume for weight sync instead of locking, allowing generation to overlap with training. In-flight samples may contain tokens from both old and new weights.
 
 **Training Modes**:
 - **Synchronous**: Default, better stability
@@ -670,7 +667,21 @@ ray job submit --address="http://127.0.0.1:8265" \
 - Single-turn: [train_ppo_ray_hybrid_engine.sh](./examples/scripts/train_ppo_ray_hybrid_engine.sh)
 - Custom reward: [train_ppo_with_reward_fn.sh](./examples/scripts/train_ppo_with_reward_fn.sh)
 - Multi-turn: [train_reinforce_baseline_ray_agent_async.sh](./examples/scripts/train_reinforce_baseline_ray_agent_async.sh)
-- NeMo Gym: `examples/python/agent_func_nemogym_executor.py`
+
+### OpenAI-Compatible Agent Server
+
+For multi-turn agents that need an OpenAI-compatible chat API (e.g., integrating external tool-use frameworks), [`agent_func_openai_server_executor.py`](./examples/python/agent_func_openai_server_executor.py) wraps vLLM as a local `/v1/chat/completions` server while collecting token-level traces for RL training.
+
+- Exposes standard OpenAI endpoints (`/v1/chat/completions`, `/v1/models`, `/tokenize`)
+- Automatically collects token IDs and logprobs per session for RL training
+- Delta-tokenization reuses prefix tokens across multi-turn calls
+- Override `run_agent()` to plug in your own multi-turn workflow
+
+```bash
+python3 -m openrlhf.cli.train_ppo_ray \
+  --agent_func_path examples/python/agent_func_openai_server_executor.py \
+  ... # other training args
+```
 
 ---
 
@@ -711,6 +722,7 @@ Optimize OpenRLHF for your hardware and workload with these recommendations:
 |--------------|------|-------------|
 | **Hybrid Engine** | `--colocate_all_models`<br>`--vllm_enable_sleep`<br>`--deepspeed_enable_sleep` | Sufficient GPU memory |
 | **Async Training** | `--async_train` | Convergence validated, need throughput |
+| **Partial Rollout** | `--partial_rollout` | Async mode, maximize generation/training overlap |
 | **Sample Packing** | `--packing_samples` | Always (especially training) |
 | **DeepCompile** | `--deepcompile` | PyTorch 2.0+ |
 | **Overlap Comm** | `--overlap_comm` | Sufficient GPU memory |

@@ -1,3 +1,5 @@
+import gc
+import json
 import os
 import shutil
 from abc import ABC
@@ -37,6 +39,8 @@ class DeepspeedStrategy(ABC):
     """
     The strategy for training with Accelerator.
     """
+
+    CKPT_METRIC_FILENAME = "metric.json"
 
     def __init__(
         self,
@@ -157,6 +161,17 @@ class DeepspeedStrategy(ABC):
             model = model.model
         model.step()
 
+    def get_grad_norm(self, model: nn.Module) -> float:
+        """Get the global gradient norm from DeepSpeed engine (pre-clipping)."""
+        if isinstance(model, Actor):
+            model = model.model
+        if hasattr(model, "get_global_grad_norm"):
+            grad_norm = model.get_global_grad_norm()
+            if grad_norm is None:
+                return 0.0
+            return grad_norm.item() if isinstance(grad_norm, torch.Tensor) else float(grad_norm)
+        return 0.0
+
     def setup_dataloader(
         self,
         replay_buffer,
@@ -167,6 +182,7 @@ class DeepspeedStrategy(ABC):
         drop_last=True,
         sampler=None,
         consumed_samples=0,
+        num_workers: int = 0,
     ):
         # DDP only mode, replay buffers on each rank are different.
         if sampler is None and dist.is_initialized():
@@ -192,6 +208,8 @@ class DeepspeedStrategy(ABC):
             shuffle=shuffle if sampler is None else False,
             collate_fn=collate_fn,
             pin_memory=pin_memory,
+            num_workers=num_workers,
+            persistent_workers=num_workers > 0,
         )
 
     def _unwrap_model(self, model) -> nn.Module:
@@ -231,6 +249,18 @@ class DeepspeedStrategy(ABC):
                 model.model = tp_model
             else:
                 model = tp_model
+
+            # Recreate optimizer over sharded params to free pre-sharded weight references.
+            # Without this, the old optimizer still pins the full (unsharded) tensors in GPU
+            # memory, causing OOM when deepspeed.initialize() allocates gradient partitions.
+            old_defaults = optim.defaults.copy()
+            if scheduler is not None:
+                scheduler.optimizer = None
+            optim = self.create_optimizer(model, **old_defaults)
+            if scheduler is not None:
+                scheduler.optimizer = optim
+            gc.collect()
+            torch.cuda.empty_cache()
 
         engine, optim, _, scheduler = deepspeed.initialize(
             model=model.model if is_actor else model,
@@ -458,41 +488,118 @@ class DeepspeedStrategy(ABC):
             return 0
         return dist.get_rank()
 
-    def save_ckpt(self, model, save_dir, tag=None, max_num=3, max_mem=1000, client_state={}, save_latest=True):
+    def _get_ckpt_metric_path(self, ckpt_dir):
+        return os.path.join(ckpt_dir, self.CKPT_METRIC_FILENAME)
+
+    def _write_ckpt_metric(self, ckpt_dir, metric_value, metric_key=None):
+        os.makedirs(ckpt_dir, exist_ok=True)
+        metric_path = self._get_ckpt_metric_path(ckpt_dir)
+        with open(metric_path, "w") as f:
+            json.dump({"metric_key": metric_key, "metric_value": metric_value}, f, indent=2, sort_keys=True)
+
+    def _read_ckpt_metric(self, ckpt_dir):
+        metric_path = self._get_ckpt_metric_path(ckpt_dir)
+        if not os.path.exists(metric_path):
+            return None
+
+        try:
+            with open(metric_path, "r") as f:
+                payload = json.load(f)
+        except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+            self.print(f"Warning: failed to read checkpoint metric from {metric_path}: {exc}")
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        metric_value = payload.get("metric_value")
+        if metric_value is None:
+            return None
+
+        try:
+            return float(metric_value)
+        except (TypeError, ValueError):
+            self.print(f"Warning: invalid checkpoint metric in {metric_path}: {metric_value}")
+            return None
+
+    def save_ckpt(
+        self,
+        model,
+        save_dir,
+        tag=None,
+        max_num=3,
+        max_mem=1000,
+        client_state=None,
+        save_latest=True,
+        metric_value=None,
+        metric_key=None,
+    ):
         assert isinstance(model, deepspeed.DeepSpeedEngine)
+        client_state = client_state or {}
+        is_best = tag is not None and tag.startswith("best")
+
         if self.is_rank_0():
             os.makedirs(save_dir, exist_ok=True)
-            MAX_SIZE = max_mem * 1024**3  # Convert GB to bytes
 
+            # Remove old best checkpoints when saving a new best.
+            if is_best:
+                for d in os.listdir(save_dir):
+                    if d.startswith("best") and d != tag and os.path.isdir(os.path.join(save_dir, d)):
+                        old_best = os.path.join(save_dir, d)
+                        shutil.rmtree(old_best)
+                        self.print(f"Removed old best checkpoint {old_best}")
+
+            # Rotate old checkpoints to stay within max_num / max_mem limits.
+            # Best checkpoints are protected from eviction and excluded from max_num counting.
+            max_size_bytes = max_mem * 1024**3
             while True:
-                subdirs = sorted(
-                    [
-                        (os.path.join(save_dir, d), os.path.getmtime(os.path.join(save_dir, d)))
-                        for d in os.listdir(save_dir)
-                        if os.path.isdir(os.path.join(save_dir, d))
-                    ],
-                    key=lambda x: x[1],
-                )
+                all_subdirs = [
+                    (os.path.join(save_dir, d), os.path.getmtime(os.path.join(save_dir, d)))
+                    for d in os.listdir(save_dir)
+                    if os.path.isdir(os.path.join(save_dir, d))
+                ]
+                regular_subdirs = [
+                    (path, mtime) for path, mtime in all_subdirs if not os.path.basename(path).startswith("best")
+                ]
+
                 total_size = sum(
                     os.path.getsize(os.path.join(dirpath, f))
-                    for subdir, _ in subdirs
+                    for subdir, _ in all_subdirs
                     for dirpath, _, filenames in os.walk(subdir)
                     for f in filenames
                 )
 
-                if len(subdirs) >= max_num or total_size > MAX_SIZE:
-                    oldest_dir = subdirs[0][0]
-                    if os.path.exists(oldest_dir):
-                        shutil.rmtree(oldest_dir)
-                        self.print(f"Deleted oldest ckpt {oldest_dir}")
-                else:
+                # +1 accounts for the checkpoint about to be saved; best ckpts don't count toward max_num
+                overflow_num = max(0, len(regular_subdirs) - max_num + 1) if not is_best else 0
+                overflow_mem = total_size > max_size_bytes
+                if overflow_num == 0 and not overflow_mem:
                     break
+
+                # Build eviction candidates from regular checkpoints only.
+                # Sort: no-metric first (least informative), then worst metric, then oldest.
+                candidates = sorted(
+                    [(path, self._read_ckpt_metric(path), mtime) for path, mtime in regular_subdirs],
+                    key=lambda item: (
+                        item[1] is not None,  # None-metric first (delete first)
+                        item[1] if item[1] is not None else float("-inf"),  # then worst metric
+                        item[2],  # then oldest
+                    ),
+                )
+                if not candidates:
+                    break
+
+                delete_dir, delete_metric, _ = candidates[0]
+                reason = f"metric={delete_metric}" if delete_metric is not None else "no metric (oldest)"
+                if os.path.exists(delete_dir):
+                    shutil.rmtree(delete_dir)
+                    self.print(f"Deleted checkpoint {delete_dir} ({reason})")
 
         torch_dist_barrier_and_cuda_sync()
         model.save_checkpoint(save_dir, tag=tag, client_state=client_state, save_latest=save_latest)
 
-        # Explicitly release memory
-        import gc
+        # Write metric after successful save to avoid orphaned metric files on crash.
+        if self.is_rank_0() and tag is not None:
+            self._write_ckpt_metric(os.path.join(save_dir, tag), metric_value, metric_key=metric_key)
 
         gc.collect()
 
@@ -516,5 +623,6 @@ class DeepspeedStrategy(ABC):
             load_module_only=load_module_only,
         )
         if load_path is None:
-            raise Exception(f"[deepspeed] failed to resume from checkpoint {load_dir}")
+            self.print(f"Warning: [deepspeed] No checkpoint found at {load_dir}, skipping checkpoint loading.")
+            return None, {}
         return load_path, states

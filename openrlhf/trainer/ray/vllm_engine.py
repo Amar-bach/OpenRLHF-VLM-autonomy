@@ -138,6 +138,12 @@ class LLMRayActor:
     async def reset_prefix_cache(self):
         await self.llm.reset_prefix_cache()
 
+    async def pause_generation(self):
+        await self.llm.pause_generation(mode="keep")
+
+    async def resume_generation(self):
+        await self.llm.resume_generation()
+
     async def sleep(self, level=1):
         await self.llm.sleep(level=level)
 
@@ -153,10 +159,14 @@ class LLMRayActor:
         for tag in tags:
             await self.llm.wake_up(tags=[tag])
 
-    async def generate(self, prompt_token_ids, sampling_params):
+    async def generate(self, prompt_token_ids, sampling_params, multi_modal_data=None):
         """Token-level generation for rollout executors."""
+        prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+        if multi_modal_data:
+            prompt["multi_modal_data"] = multi_modal_data
+
         generator = self.llm.generate(
-            TokensPrompt(prompt_token_ids=prompt_token_ids),
+            prompt,
             deepcopy(sampling_params),
             request_id=random_uuid(),
         )
@@ -179,6 +189,7 @@ class LLMRayActor:
         max_length: int,
         hf_tokenizer,
         num_samples: int = 1,
+        images=None,
     ):
         """Generate N samples for a single prompt."""
         tasks = [
@@ -189,6 +200,7 @@ class LLMRayActor:
                 max_length=max_length,
                 hf_tokenizer=hf_tokenizer,
                 llm_engine=self,
+                images=images,
             )
             for _ in range(num_samples)
         ]
@@ -210,6 +222,7 @@ def create_vllm_engines(
     logprobs_mode=None,
     agent_func_path: Optional[str] = None,
     remote_rm_url: Optional[str] = None,
+    max_images_per_prompt: int = 0,
 ):
     """Spin up a set of vLLM Ray actors with consistent placement."""
     vllm_engines = []
@@ -261,6 +274,9 @@ def create_vllm_engines(
                 "remote_rm_url": remote_rm_url,
             }
         )
+
+        if max_images_per_prompt > 0:
+            actor_kwargs["limit_mm_per_prompt"] = {"image": max_images_per_prompt}
 
         if logprobs_mode:
             actor_kwargs["logprobs_mode"] = logprobs_mode

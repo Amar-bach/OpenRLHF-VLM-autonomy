@@ -1,7 +1,48 @@
 from typing import Optional, Tuple, Union
 
+import deepspeed
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
+
+
+def set_z3_leaf_modules(model: nn.Module) -> None:
+    """Auto-detect and set DeepSpeed ZeRO3 leaf modules.
+
+    ZeRO3 prefetches submodule parameters assuming a fixed module traversal order.
+    This breaks for:
+      - MoE: dynamic expert routing makes prefetch unpredictable.
+        (https://github.com/microsoft/DeepSpeed/pull/4966)
+      - Hybrid architectures (e.g., Qwen3.5): same decoder layer class but different
+        child submodules per instance (self_attn vs linear_attn).
+
+    Marking these as z3 leaves forces whole-module allgather instead of per-submodule
+    prefetch, fixing the issue at the cost of slightly higher peak memory.
+    """
+    z3_leaf_classes = set()
+    child_sigs: dict[type, frozenset[str]] = {}
+
+    for m in model.modules():
+        # MoE: dynamic expert routing
+        if "SparseMoeBlock" in m.__class__.__name__:
+            z3_leaf_classes.add(m.__class__)
+            continue
+
+        # Hybrid: same class, different child submodules across instances
+        cls = m.__class__
+        children = frozenset(name for name, _ in m.named_children())
+        if not children:
+            continue
+        if cls in child_sigs:
+            if child_sigs[cls] != children:
+                z3_leaf_classes.add(cls)
+        else:
+            child_sigs[cls] = children
+
+    if z3_leaf_classes:
+        deepspeed.utils.set_z3_leaf_modules(model, list(z3_leaf_classes))
+        for cls in z3_leaf_classes:
+            print(f"Setting zero3 leaf: {cls.__name__}")
 
 
 def compute_approx_kl(
@@ -18,27 +59,24 @@ def compute_approx_kl(
         log_probs_base: Log probabilities of the base distribution.
     """
 
+    log_ratio = log_probs.float() - log_probs_base.float()
+
     if kl_estimator == "k1":
-        log_ratio = log_probs.float() - log_probs_base.float()
-
-    # The k2 estimator is the non negative kl approximation in
-    # http://joschu.net/blog/kl-approx.html
-    # The k2_loss is approximately equivalent to the
-    # one-step KL divergence penalty with the k1 estimator
-    # used in https://arxiv.org/pdf/2310.10505.
-    if kl_estimator == "k2":
-        log_ratio = log_probs.float() - log_probs_base.float()
+        pass  # log_ratio is already p - q
+    elif kl_estimator == "k2":
+        # Non-negative KL approximation: (p - q)^2 / 2
+        # http://joschu.net/blog/kl-approx.html
+        # Approximately equivalent to one-step KL penalty with k1
+        # used in https://arxiv.org/pdf/2310.10505.
         log_ratio = log_ratio**2 / 2.0
+    elif kl_estimator == "k3":
+        # Non-negative KL approximation: exp(q - p) - 1 - (q - p)
+        # http://joschu.net/blog/kl-approx.html
+        log_ratio = (-log_ratio).exp() - 1 + log_ratio
+    else:
+        raise ValueError(f"Unknown kl_estimator: {kl_estimator}")
 
-    # The k3 estimator is the non negative kl approximation in
-    # http://joschu.net/blog/kl-approx.html
-    if kl_estimator == "k3":
-        log_ratio = log_probs.float() - log_probs_base.float()
-        log_ratio = -log_ratio
-        log_ratio = log_ratio.exp() - 1 - log_ratio
-
-    log_ratio = log_ratio.clamp(min=-10, max=10)
-    return log_ratio
+    return log_ratio.clamp(min=-10, max=10)
 
 
 def compute_reward(

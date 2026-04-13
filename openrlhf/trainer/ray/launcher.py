@@ -130,8 +130,17 @@ class ReferenceModelActor(BaseModelActor):
         attention_mask: Optional[torch.Tensor] = None,
         return_output=False,
         packed_seq_lens: Optional[list[int]] = None,
+        mm_train_inputs_list=None,
     ) -> torch.Tensor:
         device = torch.cuda.current_device()
+
+        # VLM: merge pre-processed multimodal inputs from all samples in batch
+        mm_inputs = {}
+        if mm_train_inputs_list and getattr(self.model, "is_vlm", False):
+            from openrlhf.utils.vlm_utils import merge_mm_train_inputs
+
+            mm_inputs = merge_mm_train_inputs(mm_train_inputs_list, device)
+
         with torch.no_grad():
             log_probs = self.model(
                 sequences.to(device),
@@ -139,6 +148,7 @@ class ReferenceModelActor(BaseModelActor):
                 attention_mask.to(device),
                 ring_attn_group=self.strategy.ring_attn_group,
                 packed_seq_lens=packed_seq_lens,
+                **mm_inputs,
             )
         return log_probs.to("cpu")
 
@@ -343,17 +353,19 @@ class RayActorGroup:
         if total_length % effective_actors != 0:
             chunk_size += 1
 
-        all_data_ref = ray.put(kwargs)
-
+        # Pre-slice data before ray.put so each worker only receives its chunk.
+        # This avoids transferring the full batch to every node (critical at scale).
         refs = []
         for chunk_idx in range(effective_actors):
             start_idx = chunk_idx * chunk_size
             end_idx = min((chunk_idx + 1) * chunk_size, total_length)
 
+            chunk_data = {key: value[start_idx:end_idx] for key, value in kwargs.items()}
+            chunk_ref = ray.put(chunk_data)
+
             for j in range(self.duplicate_actors):
                 actor_idx = chunk_idx * self.duplicate_actors + j
                 actor = self._actor_handlers[actor_idx]
-
-                refs.append(actor.execute_batch.remote(method_name, all_data_ref, start_idx, end_idx))
+                refs.append(actor.execute_batch.remote(method_name, chunk_ref, 0, end_idx - start_idx))
 
         return refs
