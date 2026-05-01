@@ -1,0 +1,137 @@
+You will improve a vision-language reasoning example. The image was already
+processed by a vision model and is summarized through 16 candidate reasoning
+traces below. Your job is to produce ONE clean, forward-reasoning chain of
+thought that a student model can learn from — or to reject the example if
+no honest trace can be produced.
+
+================================================================
+QUESTION:
+{question}
+
+GOLD ANSWER:
+{gold_answer}
+
+CANDIDATES (presented in randomized order):
+{candidates_block}
+================================================================
+
+GROUND RULES — read before reasoning.
+
+A. Forward reasoning only. The trace must read as if you derived the answer
+   from the visual evidence. Never write "since the answer is",
+   "given that the answer", "we know the answer", "working backward",
+   "gold answer", or any equivalent. The reader must not be able to tell
+   that you knew the answer in advance.
+
+B. Cross-candidate consensus is your visual prior, but it is NOT ground
+   truth. When the gold answer contradicts the majority candidate answer,
+   you must NOT invent visual claims to bridge the gap. Either:
+     (i) find genuine, multi-candidate visual evidence that supports the
+         gold answer and build a forward-reasoning trace from it, or
+     (ii) choose strategy="reject" with reject_reason="gold_consensus_conflict".
+   Picking the candidate-majority answer over the gold answer is NOT an
+   option — that produces wrong-answer training data.
+
+C. Cite only visual facts that appear in at least two candidates, plus the
+   question text. Single-candidate visual claims are suspect and must not
+   appear in the enriched trace.
+
+================================================================
+SCORING RUBRIC (0-4 per dimension)
+
+Faithfulness — every visual claim grounded in cross-candidate consensus.
+  0 = contradicts consensus or invents a visual fact
+  1 = several unsupported claims
+  2 = one clear unsupported claim, rest grounded
+  3 = all claims grounded, but at least one cites only two candidates
+      (weak support)
+  4 = every visual claim is supported by 3+ candidates
+
+Logical validity — each step follows from the previous.
+  0 = contains a fallacy or self-contradiction
+  1 = a step does not follow; conclusion still lands by luck
+  2 = one minor gap, papered over
+  3 = sound, but one step is more assertion than derivation
+  4 = every step is a clean inference from the previous step
+
+Completeness — a reader can verify the answer from the trace alone.
+  0 = major hand-waving, missing key steps
+  1 = key step missing, conclusion not verifiable
+  2 = adequate; one or two steps left implicit
+  3 = thorough; one minor implicit step remains
+  4 = every step a reader needs is shown explicitly
+
+Conciseness — no redundancy or padding.
+  0 = bloated; the same point restated 3+ times
+  1 = noticeable repetition or filler
+  2 = acceptable; some filler
+  3 = tight; one sentence could be trimmed
+  4 = nothing can be removed without losing information
+
+A score of 4 should be rare. Default to 2 or 3 unless the trace genuinely
+clears the bar.
+
+================================================================
+OUTPUT CONTRACT
+
+Respond with EXACTLY ONE JSON object, wrapped in a single ```json fenced
+block, and NOTHING ELSE. No prose before, after, or between fields. No
+<answer> tags. No "Step N:" headers outside the JSON. If you find yourself
+about to write prose outside the JSON, stop and put it in the appropriate
+field instead.
+
+All reasoning steps live inside the JSON. The schema is:
+
+```json
+{
+  "triage": [
+    {"orig_idx": <int>, "answer_correct": <bool>, "note": "<one sentence: biggest strength or weakness>"}
+  ],
+  "reasoning_trace": "<your private scratch reasoning before deciding strategy: candidate clustering, evidence weighing, why-this-strategy. Not seen by the student. 3-8 sentences.>",
+  "strategy": {
+    "choice": "refine | rewrite | synthesize | reject",
+    "justification": "<1-2 sentences>",
+    "selected_candidate_idx": <int when choice=refine, else -1>,
+    "reject_reason": "<string when choice=reject, else null>"
+  },
+  "enriched_cot": "<the forward-reasoning trace the student will see; empty string if strategy=reject>",
+  "final_answer": "<answer that the enriched_cot lands on; empty string if strategy=reject>",
+  "self_check": {
+    "matches_gold": <bool>,
+    "explanation": "<one sentence comparing final_answer to gold>"
+  },
+  "scores": {
+    "faithfulness":     {"score": <0-4>, "justification": "<one sentence>"},
+    "logical_validity": {"score": <0-4>, "justification": "<one sentence>"},
+    "completeness":     {"score": <0-4>, "justification": "<one sentence>"},
+    "conciseness":      {"score": <0-4>, "justification": "<one sentence>"}
+  },
+  "keep_for_sft": <bool>
+}
+```
+
+Strategy definitions:
+  refine     — one candidate is mostly correct; polish it (set selected_candidate_idx)
+  rewrite    — useful steps are scattered across several candidates; assemble
+  synthesize — most candidates land on the correct answer but no single trace
+               is salvageable; write fresh from cross-candidate visual consensus.
+               IMPORTANT: do NOT pick synthesize when the candidate majority
+               disagrees with the gold answer — in that case use refine on a
+               correct minority candidate, or reject with
+               reject_reason="gold_consensus_conflict".
+  reject     — no honest forward-reasoning trace can produce the gold answer
+               from the available visual evidence
+
+keep_for_sft gate (compute deterministically):
+  keep iff strategy.choice != "reject"
+        AND triage is non-empty
+        AND enriched_cot is non-empty
+        AND final_answer is non-empty
+        AND self_check.matches_gold == true
+        AND scores.faithfulness.score     >= 3
+        AND scores.logical_validity.score >= 3
+        AND min(scores.completeness.score, scores.conciseness.score) >= 2
+
+Write the trace inside enriched_cot to match the problem's complexity —
+neither hand-wave nor pad. End enriched_cot with the final answer on its
+own line, prefixed "Answer: ".

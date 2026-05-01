@@ -16,7 +16,8 @@ from pathlib import Path
 from collections import defaultdict
 
 N_SAMPLES = 16
-JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+THINK_RE  = re.compile(r"<think>(.*?)</think>",   re.DOTALL)
+ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
 
 
 def load_processed_ids(out_path: Path) -> set:
@@ -79,12 +80,14 @@ def render_prompt(template: str, sample_set, rng: random.Random):
     blocks = []
     for orig_idx in candidate_order:
         s = sample_set[orig_idx]
-        cot = s.get("thinking") or s.get("raw") or ""
-        ans = s.get("answer") or ""
+        grounding = (s.get("grounding") or "").strip()
+        cot = (s.get("thinking") or s.get("raw") or "").strip()
+        ans = (s.get("answer") or "").strip()
         blocks.append(
             f"[orig_idx={orig_idx}]\n"
-            f"  Reasoning: {cot.strip()}\n"
-            f"  Answer:    {ans.strip()}"
+            f"  Grounding: {grounding}\n"
+            f"  Reasoning: {cot}\n"
+            f"  Answer:    {ans}"
         )
     rendered = (template
                 .replace("{question}", str(question))
@@ -94,27 +97,16 @@ def render_prompt(template: str, sample_set, rng: random.Random):
 
 
 def parse_teacher_output(text: str):
-    m = JSON_BLOCK_RE.search(text)
-    if m:
-        try:
-            return json.loads(m.group(1))
-        except Exception:
-            pass
-    depth = 0
-    start = None
-    for i, c in enumerate(text):
-        if c == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0 and start is not None:
-                try:
-                    return json.loads(text[start:i+1])
-                except Exception:
-                    start = None
-    return None
+    a = ANSWER_RE.search(text)
+    if not a:
+        return None
+    answer = a.group(1).strip()
+    t = THINK_RE.search(text)
+    return {
+        "think":    t.group(1).strip() if t else "",
+        "answer":   answer,
+        "rejected": answer.upper() == "REJECT",
+    }
 
 
 def main():
@@ -130,7 +122,7 @@ def main():
     ap.add_argument("--watch-sleep", type=int, default=60)
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--max-input-tokens", type=int, default=48000)
-    ap.add_argument("--max-output-tokens", type=int, default=4096)
+    ap.add_argument("--max-output-tokens", type=int, default=16384)
     ap.add_argument("--temperature", type=float, default=0.6)
     ap.add_argument("--top-p", type=float, default=0.95)
     ap.add_argument("--seed", type=int, default=0)

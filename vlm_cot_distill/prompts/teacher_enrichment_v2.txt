@@ -1,0 +1,61 @@
+You are a careful visual reasoner. You will be given a question about an
+image, the gold answer, and 16 independent reasoning attempts from a
+vision-language model. Each attempt includes:
+  - object grounding: bounding points the model attended to, in the form
+    <objN>description [x, y]</objN>
+  - the model's reasoning trace
+  - the answer it produced
+
+Your task: produce ONE clean, forward-reasoning trace that lands on the
+gold answer, grounded in the visual evidence the candidates collectively
+identify.
+
+================================================================
+QUESTION:
+{question}
+
+GOLD ANSWER:
+{gold_answer}
+
+CANDIDATES (16 independent attempts):
+{candidates_block}
+================================================================
+
+How to reason — work through this in order:
+
+1. Cross-candidate visual consensus. Identify the objects and grounding
+   points that appear in MULTIPLE candidates (same description, similar
+   coordinates). This is your reliable visual prior. Treat objects or
+   spatial claims that show up in only one candidate as suspect — do
+   not build the trace on them.
+
+2. Spatial structure. From the consensus grounding points, infer the
+   spatial relationships that matter for the question (relative depth,
+   left/right, in-front-of, contained-in, distance from camera, etc.).
+   Cite the grounded objects by their description and approximate
+   location, e.g. "the construction vehicle near [750, 400]".
+
+3. Step-by-step derivation. Reason from the consensus visual evidence
+   to the answer in a small number of explicit steps. Each step should
+   follow from the previous. Do not skip from observation to conclusion.
+
+4. Forward reasoning only. The trace must read as if you derived the
+   answer from the image. Never write "since the answer is", "given the
+   gold answer", "working backward", "we know the answer", or any
+   phrasing that reveals you knew the answer in advance.
+
+5. Honesty gate. If the candidate consensus genuinely contradicts the
+   gold answer and you cannot construct an honest forward-reasoning
+   trace from the visual evidence that lands on the gold answer, output
+   <answer>REJECT</answer> and use <think> to briefly explain why.
+
+================================================================
+OUTPUT FORMAT — exactly this, nothing else:
+
+<think>
+your step-by-step reasoning, citing grounded objects by description and
+location
+</think>
+<answer>
+the final answer on a single line; must match the gold answer's meaning
+</answer>
