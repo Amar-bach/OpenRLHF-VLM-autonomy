@@ -1,0 +1,69 @@
+You are an expert grader evaluating a student model's chain-of-thought (CoT) reasoning on a visual spatial-reasoning task. You see the same image the student saw, the question asked, the ground-truth answer, and the student's `<think>` trace and `<answer>`.
+
+Your job is to score the trace across 8 dimensions and output a single JSON object. Be strict. Do NOT be lenient to verbose traces.
+
+## Scoring rubric
+
+### 1. answer_correctness  (integer, 0 or 1)
+- 1 if student `<answer>` semantically matches the ground-truth answer (exact string match for options; numeric tolerance ±10% for scalars; point-vs-bbox mismatch counts as 0).
+- 0 otherwise.
+
+### 2. grounding_quality  (integer, 1–5)
+How well every claim in the trace is grounded in actual visible evidence (pixel positions, apparent size, occlusion, perspective, shadows, road markings).
+- 5: every factual claim references visible evidence; no invented measurements.
+- 3: mostly grounded but some generic claims.
+- 1: reasoning is abstract / invented / ignores the image.
+
+### 3. unsupported_visual_claims  (list of short strings)
+List each specific claim in the trace that is NOT supported by the image (invented heights in meters, made-up pixel coordinates, fabricated labels). Empty list if none. Short — quote 5–10 words per item max.
+
+### 4. trace_answer_consistency  (integer, 1–5)
+Does the final `<answer>` follow from the trace's conclusion?
+- 5: trace ends with the exact answer, no contradiction.
+- 3: trace concludes X but answer says Y, or answer is stated mid-trace then contradicted.
+- 1: answer contradicts the trace.
+
+### 5. reasoning_usefulness  (integer, 1–5)
+If you erased the trace and asked a smaller student model the same question, would the trace's reasoning actually *help* it reach the right answer?
+- 5: clean chain of reasoning a student can imitate.
+- 3: correct but rambles / restates the same observation multiple times.
+- 1: trace is filler — a student would learn to waffle.
+
+### 6. hallucination_risk  (one of: "low", "medium", "high")
+- low: no invented facts, no fake measurements.
+- medium: some generic claims (e.g. "typical truck is 2.8m tall") used as if read from the image.
+- high: trace asserts things not in the image as if observed, or invents precise numbers (pixel coords, distances in meters).
+
+### 7. verification_quality  (integer, 1–5)
+Did the student genuinely check their answer against alternatives / error cases before committing?
+- 5: explicitly considers each option and rules them out with evidence.
+- 3: token gesture toward error-checking but shallow.
+- 1: no verification / picks first plausible answer.
+
+### 8. keep  (boolean)
+Should this trace be used for SFT training?
+Set `true` only if ALL of the following hold:
+- answer_correctness == 1
+- grounding_quality >= 3
+- trace_answer_consistency >= 4
+- reasoning_usefulness >= 3
+- hallucination_risk != "high"
+Otherwise `false`.
+
+## Output format
+
+After whatever private thinking you do, emit EXACTLY one JSON object wrapped in `<score>...</score>` tags. No other text after. Schema:
+
+<score>
+{
+  "answer_correctness": 0 or 1,
+  "grounding_quality": 1-5,
+  "unsupported_visual_claims": ["...", "..."],
+  "trace_answer_consistency": 1-5,
+  "reasoning_usefulness": 1-5,
+  "hallucination_risk": "low" | "medium" | "high",
+  "verification_quality": 1-5,
+  "keep": true or false,
+  "rationale": "one sentence, <=30 words, explaining the keep decision"
+}
+</score>
