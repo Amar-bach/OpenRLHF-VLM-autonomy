@@ -47,15 +47,25 @@ How to reason — work through this in order:
 5. Honesty gate. If the candidate consensus genuinely contradicts the
    gold answer and you cannot construct an honest forward-reasoning
    trace from the visual evidence that lands on the gold answer, output
-   <answer>REJECT</answer> and use <think> to briefly explain why.
+   <answer>REJECT</answer> and put a one-sentence reason inside
+   <reasoning>...</reasoning>.
 
 ================================================================
-OUTPUT FORMAT — exactly this, nothing else:
+OUTPUT FORMAT — read carefully.
 
-<think>
-your step-by-step reasoning, citing grounded objects by description and
-location
-</think>
+You may think privately first; that private deliberation is discarded
+and never shown to the student. After your private thinking, you MUST
+emit two visible XML blocks, in this exact order, with nothing before,
+between, or after them:
+
+<reasoning>
+your step-by-step forward-reasoning trace, citing grounded objects by
+description and approximate location. This is the ONLY reasoning the
+student will see at training time. It must be non-empty, self-contained,
+and obey the forward-reasoning rule (no gold-answer references). If you
+leave this block empty or put your reasoning anywhere else, the example
+is unusable — write the full derivation here, not in your private think.
+</reasoning>
 <answer>
 the final answer on a single line; must match the gold answer's meaning
 </answer>

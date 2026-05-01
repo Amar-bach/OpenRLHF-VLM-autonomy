@@ -16,8 +16,9 @@ from pathlib import Path
 from collections import defaultdict
 
 N_SAMPLES = 16
-THINK_RE  = re.compile(r"<think>(.*?)</think>",   re.DOTALL)
-ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
+REASONING_RE = re.compile(r"<reasoning>(.*?)</reasoning>", re.DOTALL)
+ANSWER_RE    = re.compile(r"<answer>(.*?)</answer>",       re.DOTALL)
+NATIVE_THINK_CLOSE = "</think>"
 
 
 def load_processed_ids(out_path: Path) -> set:
@@ -101,11 +102,23 @@ def parse_teacher_output(text: str):
     if not a:
         return None
     answer = a.group(1).strip()
-    t = THINK_RE.search(text)
+    r = REASONING_RE.search(text)
+    reasoning = r.group(1).strip() if r else ""
+    fallback = False
+    if not reasoning:
+        # model dumped everything in native <think> and emitted no <reasoning>;
+        # take text between last </think> close and <answer> open as the trace
+        pre = text[: a.start()]
+        if NATIVE_THINK_CLOSE in pre:
+            reasoning = pre.rsplit(NATIVE_THINK_CLOSE, 1)[1].strip()
+        else:
+            reasoning = pre.strip()
+        fallback = bool(reasoning)
     return {
-        "think":    t.group(1).strip() if t else "",
-        "answer":   answer,
-        "rejected": answer.upper() == "REJECT",
+        "reasoning":         reasoning,
+        "answer":            answer,
+        "rejected":          answer.upper() == "REJECT",
+        "reasoning_source":  "fallback" if fallback else ("reasoning_tag" if r else "empty"),
     }
 
 
