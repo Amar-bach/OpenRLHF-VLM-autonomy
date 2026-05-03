@@ -221,18 +221,31 @@ Updated for new schema:
 
 ```
 vlm_cot_distill/
-├── prompts/
-│   ├── judge_per_trace.txt         # NEW — Stage B1
-│   ├── scene_description.txt       # NEW — Stage B2
-│   ├── deepseek_polish.txt         # NEW — Phase C1
-│   └── deepseek_rederive.txt       # NEW — Phase C2
-├── qwen_judge.py                   # NEW — Stage B (B1 + B2)
-└── deepseek_polish.py              # NEW — Phase C (C1 + C2)
+├── stage_a_sample/                 # Qwen3-VL-235B N=16 candidate sampler
+│   ├── cot_sample.py
+│   └── prompts/
+│       ├── system_surds.txt
+│       ├── system_surds_structured.txt
+│       └── system_surds_grounding.txt
+├── stage_b_judge/                  # Qwen3-VL-32B per-trace judge + scene description
+│   ├── qwen_judge.py
+│   └── prompts/
+│       ├── judge_per_trace.txt     # B1
+│       └── scene_description.txt   # B2
+├── stage_c_polish/                 # DeepSeek-V4-Flash text polish (queued)
+│   ├── teacher_enrich.py           # to be replaced by deepseek_polish.py
+│   └── prompts/
+│       ├── teacher_enrichment_v0.1.txt
+│       └── teacher_enrichment_v2.txt
+├── data/                           # static fixtures (example inputs, val splits)
+├── scripts/                        # one-off bash (model downloads, etc.)
+├── tools/                          # data-prep helpers
+└── legacy/                         # superseded scripts kept for reference
 ```
 
 DeepSeek artifacts to retire after Phase C lands:
-- `teacher_enrich.py`
-- `prompts/teacher_enrichment_v0.1.txt`, `prompts/teacher_enrichment_v2.txt`
+- `stage_c_polish/teacher_enrich.py`
+- `stage_c_polish/prompts/teacher_enrichment_v*.txt`
 - `slurm_scripts/pretrain_model_10.sh`
 
 (Keep `vllm_deepseekv4_cu130.sif` — needed for Phase C.)
