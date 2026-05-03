@@ -1,0 +1,66 @@
+You are an expert visual scene-description writer with deep
+specialization in driving scenes. You excel at producing complete,
+text-only descriptions of road scenes that capture every object,
+position, and spatial relationship needed for downstream reasoning —
+a text-only reader of your description should be able to answer
+questions about the scene as if they had seen the image themselves.
+
+You will produce a complete textual scene description of the image
+above. The description must contain all visual evidence needed to
+answer the question correctly without seeing the image — a text-only
+reasoner who reads only your description and the question must be
+able to derive the gold answer.
+
+================================================================
+QUESTION:
+{question}
+
+GOLD ANSWER:
+{gold_answer}
+
+WINNING TRACE'S OBJECT GROUNDING (anchor points to enumerate):
+{grounding}
+
+WINNING TRACE (for context, not to be copied verbatim):
+{trace}
+
+WINNING ANSWER:
+{answer}
+================================================================
+
+How to write the description.
+
+1. Enumerate every <objN>description [x, y]</objN> from the grounding.
+   For each one, write a short clause naming the object and its
+   approximate location, citing the coordinate. Add any object clearly
+   visible in the image and relevant to the question, even if not in
+   the grounding.
+
+2. State the spatial relationships among these objects that are
+   relevant to the question: left/right ordering, depth (closer to /
+   farther from the camera), occlusion (which blocks which), in-front-
+   of / behind, contained-in, etc. Use coordinates as evidence
+   (e.g. "x ≈ 290 places it on the left").
+
+3. Include any depth or perspective cues the answer depends on:
+   relative size in frame, vertical position, occluding edges, horizon
+   line, vanishing point, etc.
+
+4. Self-containment. A text-only reasoner reading only your
+   description and the question must be able to derive the gold
+   answer. Do not omit the cue that makes the answer derivable.
+
+5. Do NOT explain the answer. Do NOT write reasoning steps. Do NOT
+   reference "the image" or "the trace" — write as if dictating what
+   the scene contains.
+
+6. Do NOT state, paraphrase, or hint at the gold answer. The
+   description is purely descriptive; the answer must be derivable
+   from the description plus the question, not stated in it.
+
+================================================================
+OUTPUT — exactly this, nothing else.
+
+You may think privately first; that is discarded. Output ONLY the
+description as 4–8 plain sentences. No headers, no JSON, no XML tags,
+no preface, no trailing commentary.

@@ -1,139 +1,276 @@
-# CoT Enrichment Plan (Vision-R1-style, single-prompt)
+# CoT Enrichment Plan — Qwen Judge + DeepSeek Text-Only Polish
 
-## Goal
-Convert N=16 sampled rationales from Qwen3-VL-235B-Thinking-FP8 into one
-high-quality answer-conditioned CoT per example, suitable for cold-start
-SFT of a smaller VLM (downstream: SURDS / CODA-LM / DriveLM). Collapse
-triage, critique, re-derivation, self-check, scoring, and gating into a
-SINGLE teacher call (DeepSeek-V4-Flash, text-only).
+Three-stage pipeline that converts raw Qwen3-VL-235B N=16 sampling traces
+(Stage A) into SFT-ready VLM CoT data through:
 
-Research basis: see `cot_enrichment_research.md`.
+1. **Stage B — Qwen-as-judge rejection sampling** picks the best of 16
+   candidate (grounding + trace) per QA and produces a self-contained text-only
+   scene description.
+2. **Phase C — DeepSeek-V4-Flash text-only polish** takes the winning trace
+   (or the description alone) and produces a clean modality-bridged trace.
+3. **Stage D — SFT formatting** emits image-grounded and text-only training
+   pairs.
 
-## Pipeline
+Downstream targets: SURDS, CODA-LM, DriveLM.
 
-### Stage A — VLM sampling (in-flight)
-Job 1058163 on amxnl031 (sxm5, 4×H200, started 2026-04-30).
-Qwen3-VL-235B-A22B-Thinking-FP8 produces N=16 (cot, answer) candidates per
-(image, question) over 41,080 SURDS prompts. Output:
-`/mnt/data4/shasta/amar.amarjyoti/research_data/vlm_cot_distill/cot_1058163_Qwen3-VL-235B-A22B-Thinking-FP8_train_N16_T0.8_grounding.jsonl`
-One line per (id, sample_idx). Schema includes `id, sample_idx, prompt,
-gt_answer, thinking, answer, raw, ...`.
+---
 
-### Stage A.5 — Modality bridging — SKIPPED (open question for later)
-Vision-R1's recipe re-prompts the VLM to produce an authoritative
-enriched caption. We skip it for the pilot: with N=16, cross-candidate
-consensus on visual claims acts as the modality bridge. Revisit if
-Stage D audit shows faithfulness scores are noisy or hallucinations slip
-through.
+## Stage A — Sampling (in-flight, unchanged)
 
-### Stage B — Single-prompt teacher enrichment (DeepSeek-V4-Flash)
-Per example: one call, inputs are `question`, `gold_answer`, and the 16
-candidate (cot, answer) pairs in randomized order to mitigate position
-bias. Output is one JSON object (schema below).
+- **Model**: Qwen3-VL-235B-A22B-Thinking-FP8 on 4×H200 sxm5
+- **Input**: 41k SURDS train QAs (image + question + gold answer)
+- **Output per (id, sample_idx)**: `grounding` (`<obj1>desc [x, y]</obj1>...` point-style), `thinking` (CoT), `answer`
+- **Job**: 1058163 (running on `amxnl031`, ~1.5 days remaining as of 2026-05-01)
+- **Output**: `cot_1058163_Qwen3-VL-235B-A22B-Thinking-FP8_train_N16_T0.8_grounding.jsonl`
 
-**Concurrency with Stage A** (race-safe consumer of an actively-growing
-JSONL):
-- Append-only reads; trailing parse-error => wait.
-- An id is "complete" iff (a) all 16 samples are present AND (b) a
-  strictly-later id has been seen in the file. Stage A's `cot_sample.py`
-  writes all 16 samples for one id contiguously then moves on, so this
-  rule is bulletproof.
-- The output JSONL itself is the resume source of truth (no sidecar);
-  on startup, scan it once to build the processed-id set.
-- Single-instance enforced via `fcntl.flock` on the output file.
-- Exit when Stage A's job is gone (`sacct -j 1058163`) AND no
-  complete-unprocessed ids remain.
+---
 
-**Serving**: 4×H200 sxm5, vLLM:
-```
---data-parallel-size 4 --enable-expert-parallel --kv-cache-dtype fp8
---tokenizer-mode deepseek_v4
-```
-Sampling: `temperature=0.6, top_p=0.95`.
+## Stage B — Qwen-as-judge rejection sampling
 
-### Stage C — Filter & format
-Apply gate (below). Format kept records into the student VLM's chat
-template (image + question → `<think>...</think>` + answer). Rejected
-records go to a separate shard for inspection — don't discard.
+**Judge model**: Qwen3-VL-235B-A22B-Thinking-FP8 (same model as Stage A,
+**separate** vLLM instance on a second 4×H200 sxm5 allocation).
+**Runs concurrently** with Stage A using the race-safe consumer contract.
 
-### Stage D — Audit (must run before scaling)
-On a 100-example probe:
-- **Position consistency**: re-run with two random candidate-order
-  permutations; flag if `keep_for_sft` flips or scores swing >1 point.
-- **Score inflation**: hand-label 50 known-bad and 50 known-good traces;
-  measure judge TPR / TNR. Recalibrate gate thresholds if TNR < 0.5.
-- **Forward-reasoning leak check**: grep enriched CoTs for "since the
-  answer is", "given that the answer", "we know the answer"; eyeball
-  flagged samples.
+**Why Qwen judges itself**:
+- Has image access — can verify visual grounding claims (DeepSeek text-only could not).
+- Same model that generated has matching capability ceiling.
+- Self-consistency bias is anchored by gold answer (`answer_correctness`) and
+  image grounding (`hallucination` and `visual_grounding`).
 
-## Output schema (per id, written by Stage B)
-The teacher emits a fenced ```json block; we wrap it with run metadata:
+**Two call types per QA**:
+
+### Call B1 — Per-trace scoring (16 calls per QA)
+
+**Inputs**: `image, question, gold_answer, grounding_i, trace_i, answer_i`
+(one candidate at a time; the judge does NOT see the other 15 candidates).
+
+**Grounding handling — explicit and load-bearing**: the prompt must:
+- present `grounding_i` verbatim as `<obj1>desc [x, y]</obj1>` lines,
+- instruct the judge to (a) verify each `<objN>` description against the
+  image region near `[x, y]`, and (b) check that the trace's spatial
+  claims are consistent with the cited coordinates,
+- score `visual_grounding` based on per-object correctness:
+  description match AND coordinate plausibility.
+
+**Output schema** (one JSON per call, in a fenced block):
 ```json
 {
-  "id": "<surds id>",
-  "candidate_order": [<orig_idx as shown to teacher>, ...],   // length 16
-  "raw": "<full teacher text incl. </think>>",
-  "parse_ok": true,
-  "parsed": {
-    "candidate_analysis": [
-      {"orig_idx": <int>, "answer_correct": <bool>, "trace_quality": 0-4, "notes": "<1 sentence>"}
-    ],
-    "enrichment_strategy": "refine|rewrite|synthesize|reject",
-    "selected_candidate_idx": <int or -1>,
-    "enriched_cot": "<forward-reasoning trace>",
-    "final_answer": "<teacher's answer>",
-    "self_check_matches_gold": <bool>,
-    "scores": {
-      "faithfulness":     {"score": 0-4, "justification": "..."},
-      "logical_validity": {"score": 0-4, "justification": "..."},
-      "completeness":     {"score": 0-4, "justification": "..."},
-      "conciseness":      {"score": 0-4, "justification": "..."}
-    },
-    "keep_for_sft": <bool>,
-    "reject_reason": <string or null>
-  }
+  "hallucination":      {"score": 1-5, "note": "<one sentence>"},
+  "visual_grounding":   {"score": 1-5, "note": "<one sentence; cite which <objN> is wrong if any>"},
+  "reasoning_quality":  {"score": 1-5, "note": "<one sentence>"},
+  "answer_correctness": 0 or 1
 }
 ```
-`candidate_order[shown_position] = original_sample_idx` — needed to map
-the teacher's `orig_idx` references back to Stage A `sample_idx`.
 
-## Gate (initial; recalibrate after Stage D)
-Keep iff ALL of:
-- `parsed.self_check_matches_gold == true`
-- `parsed.enrichment_strategy != "reject"`
-- `parsed.scores.faithfulness.score >= 3`
-- `parsed.scores.logical_validity.score >= 3`
-- `min(parsed.scores.completeness.score, parsed.scores.conciseness.score) >= 2`
+**Score scale (1–5, anchored)**:
 
-## Key design decisions (with rationale)
-- **Skip A.5**: N=16 cross-candidate consensus replaces the explicit
-  enriched caption. Reconsider if faithfulness scoring is unstable.
-- **Empty system prompt + zero-shot**: DeepSeek-R1 family degrades with
-  system prompts and few-shot examples.
-- **0–4 scale, per-dimension justification**: Prometheus / FineSurE
-  convention; correlates ~0.89 with humans vs ~0.39 single-score.
-- **Reason-first, JSON-last**: strict inline JSON degrades reasoning
-  (Deco-G); we ask for prose for steps 1–4 and a single fenced JSON
-  block at step 5.
-- **Randomized candidate order per call**: position bias mitigation
-  (>10% accuracy swing in published studies).
-- **Raw output capture + our own JSON extractor**: no `--reasoning-parser`
-  dependency; portable across vLLM versions.
+| Score | hallucination | visual_grounding | reasoning_quality |
+|---|---|---|---|
+| 1 | heavy fabrication of objects/relations not in image | most `<objN>` wrong (description or coords) | incoherent / fallacy / contradicts itself |
+| 2 | one or two clear fabrications | a few `<objN>` wrong | step skipped, weak inference |
+| 3 | minor unsupported claim | one `<objN>` mildly off | mostly sound, one weak step |
+| 4 | nothing fabricated, all claims grounded | all `<objN>` correct, coords approximate | clean derivation, minor padding |
+| 5 | every visual claim verifiable in image | every `<objN>` accurate, coords precise | every step a clean inference, tight |
 
-## Deliverables
-- `vlm_cot_distill/cot_sample.py` (Stage A — already running)
-- `vlm_cot_distill/teacher_enrich.py` (Stage B)
-- `vlm_cot_distill/prompts/teacher_enrichment.txt` (single-prompt template)
-- `slurm_scripts/pretrain_model_10.sh` (Stage B SLURM, test mode)
-- `data/enriched/{kept,rejected}.jsonl` (Stage C)
-- `notebooks/audit_enrichment.ipynb` (Stage D)
+`answer_correctness`: 1 iff the candidate's final answer matches the gold
+answer's meaning (allow paraphrase / capitalization / punctuation
+differences); else 0.
 
-## Open questions
-- A.5 A/B: is the modality-bridge enrichment worth ~2× VLM cost?
-- Including `gold_answer` in teacher context vs. only at self-check time
-  (STaR-line evidence says including helps).
-- Single call vs. seed-ensemble (doubles cost; biggest robustness win).
-- Token budgets: Stage A's `max-tokens=16384` per candidate means a
-  single id's 16 candidates can exceed 200k tokens worst-case. Current
-  `max-input-tokens=48000` will truncate; need empirical input-length
-  distribution from Stage A output to tune.
+### Call B2 — Scene description (1 call per QA, after B1 picks the winner)
+
+**Winner selection**: `best_idx = argmax over scores[i].total` where
+`total = hallucination + visual_grounding + reasoning_quality + 5 * answer_correctness`
+(the `5 *` makes correctness a hard tie-breaker). On tie: lowest `sample_idx`.
+
+**Inputs**: `image, question, gold_answer, winning_grounding, winning_trace, winning_answer`.
+
+**Output**: 4–8 sentence text-only scene description that:
+- enumerates **every grounded object** from `winning_grounding` by description and approximate coordinate,
+- describes spatial relationships needed for the question (left/right, depth, occlusion, in-front-of, contained-in, etc.),
+- contains all visual evidence required to derive the gold answer **without seeing the image**.
+
+**Self-containment requirement**: a text-only reasoner reading
+description + question alone must derive the gold answer. This is the
+Vision-R1 modality-bridging artifact, used as input to Phase C.
+
+### Per-QA Stage B output record
+```json
+{
+  "id": "<stage-A id>",
+  "best_idx": <int 0..15>,
+  "scene_description": "<4-8 sentences, enumerates grounded objects + coords>",
+  "scores": [
+    {"sample_idx": 0, "hallucination": {...}, "visual_grounding": {...},
+     "reasoning_quality": {...}, "answer_correctness": 0|1, "score_total": <int>},
+    ... (16 entries)
+  ],
+  "best_score_total": <int>,
+  "raw_b1": [<16 raw judge generations>],
+  "raw_b2": "<full scene-description generation>",
+  "parse_ok_b1": <bool[16]>,
+  "parse_ok_b2": <bool>
+}
+```
+
+---
+
+## Phase C — DeepSeek-V4-Flash text-only polish
+
+**Queued after Stage B finishes** (or runs in race-safe streaming mode if Stage B
+output grows fast enough). DeepSeek is text-only, so it operates on the
+scene description rather than the image. Two parallel call variants per QA:
+
+### Call C1 — Trace polish (anchored on winner)
+**Inputs**: `question, gold_answer, scene_description, winning_trace, winning_answer`.
+**Task**: rewrite `winning_trace` into a clean forward-reasoning chain that
+references grounded objects/coords from `scene_description` instead of
+appealing to "the image". Output `<reasoning>...</reasoning><answer>...</answer>`.
+**Goal**: a polished image-anchored CoT that the student model learns to
+imitate when conditioned on the image.
+
+### Call C2 — Trace rederive (description-only)
+**Inputs**: `question, gold_answer, scene_description` (NO trace).
+**Task**: derive a forward-reasoning chain that lands on the gold answer
+using only the scene description — proves that the description is
+self-sufficient. Output `<reasoning>...</reasoning><answer>...</answer>`.
+**Goal**: text-only CoT for modality-bridged training.
+
+If C2 cannot land on gold from description alone, the description is
+insufficient — flag the QA, do not include in text-only SFT split.
+
+### Per-QA Phase C output record
+```json
+{
+  "id": "<stage-A id>",
+  "polished_trace":   "<C1 reasoning, image-anchored>",
+  "polished_answer":  "<C1 final answer>",
+  "rederived_trace":  "<C2 reasoning, description-only>",
+  "rederived_answer": "<C2 final answer>",
+  "c1_lands_on_gold": <bool>,
+  "c2_lands_on_gold": <bool>,
+  "raw_c1": "...",
+  "raw_c2": "..."
+}
+```
+
+---
+
+## Stage D — SFT formatting
+
+For each QA where the gates pass, emit two SFT records (independent splits):
+
+### D1 — Vision-grounded split (image-conditioned student)
+```
+user:      <image> + question
+assistant: <reasoning> {polished_trace} </reasoning> <answer> {polished_answer} </answer>
+```
+**Gate**: `c1_lands_on_gold AND best_score.answer_correctness == 1
+       AND best_score.hallucination >= 4
+       AND best_score.visual_grounding >= 4
+       AND best_score.reasoning_quality >= 3`
+
+### D2 — Text-only split (modality-bridged student)
+```
+user:      {scene_description} + question
+assistant: <reasoning> {rederived_trace} </reasoning> <answer> {rederived_answer} </answer>
+```
+**Gate**: `c2_lands_on_gold AND parse_ok_b2 AND best_score.visual_grounding >= 4`
+(visual_grounding gate ensures the description was built from accurate grounding.)
+
+---
+
+## Audit — `notebooks/cot_enrichment.ipynb`
+
+Updated for new schema:
+- Per-QA viewer: image + question + gold + 16 traces with their scores
+  (color-coded by total) + scene_description + C1 polished + C2 rederived.
+- Distributions: per-dim score histograms, `answer_correctness=1` rate per
+  task family, B2 self-containment rate (= C2 lands-on-gold rate).
+- Quality flags: scene descriptions missing grounded objects from the
+  winner, C1/C2 traces that reference "the image" (text-only leak), Stage A
+  cases where 0/16 candidates score `answer_correctness=1` (likely gold
+  mislabel).
+
+---
+
+## Compute & timeline
+
+| Stage | Calls | Hardware | Wall-clock |
+|---|---|---|---|
+| A (in-flight) | 41k × 16 = 656k | 4×H200 sxm5 (1058163) | ~1.5 days remaining |
+| B1 + B2 | 41k × 17 = 697k | second 4×H200 sxm5 | ~3.5 days, concurrent with A |
+| C1 + C2 | 41k × 2 = 82k | DeepSeek-V4-Flash 4×H200 sxm5 | ~1–1.5 days, queued after B |
+
+**Total**: ~5 days from now if Stages A/B run concurrent and C queues after B.
+
+---
+
+## Race-safe consumer contract (used by both B and C)
+
+- Read upstream `.jsonl` append-only.
+- Parse-error on trailing line ⇒ wait, do not consume.
+- An id is "complete" iff:
+  - For Stage B reading Stage A: 16 samples present in file AND a strictly-later id has been observed.
+  - For Phase C reading Stage B: the id's record has appeared (Stage B writes one record per id).
+- Output `.jsonl` IS the resume source of truth (no sidecar).
+- Single-instance enforced via `fcntl.flock` on output file.
+
+---
+
+## File layout
+
+```
+vlm_cot_distill/
+├── prompts/
+│   ├── judge_per_trace.txt         # NEW — Stage B1
+│   ├── scene_description.txt       # NEW — Stage B2
+│   ├── deepseek_polish.txt         # NEW — Phase C1
+│   └── deepseek_rederive.txt       # NEW — Phase C2
+├── qwen_judge.py                   # NEW — Stage B (B1 + B2)
+└── deepseek_polish.py              # NEW — Phase C (C1 + C2)
+```
+
+DeepSeek artifacts to retire after Phase C lands:
+- `teacher_enrich.py`
+- `prompts/teacher_enrichment_v0.1.txt`, `prompts/teacher_enrichment_v2.txt`
+- `slurm_scripts/pretrain_model_10.sh`
+
+(Keep `vllm_deepseekv4_cu130.sif` — needed for Phase C.)
+
+New SLURM scripts:
+- `slurm_scripts/pretrain_model_11.sh` — Stage B (Qwen judge), 4×H200 sxm5
+- `slurm_scripts/pretrain_model_12.sh` — Phase C (DeepSeek polish), 4×H200 sxm5
+
+---
+
+## Locked decisions
+
+| # | Decision | Choice |
+|---|---|---|
+| 1 | B2 trace seed | **winning trace from B1** |
+| 2 | Score scale | **1–5** for hallucination / visual_grounding / reasoning_quality; **0/1** for answer_correctness |
+| 3 | Hardware | **second 4×H200 sxm5 NOW**, Stage B concurrent with A |
+| 4 | Grounding emphasis | **explicit per-`<objN>` verification** in B1; **enumerate every grounded object with coords** in B2 |
+| 5 | DeepSeek role | **Phase C**, two parallel calls per QA: C1 polish (anchored on winner), C2 rederive (description-only) |
+| 6 | Self-consistency bias | ship as-is; gold + image anchors are sufficient. Revisit if Stage D quality is poor. |
+| 7 | DeepSeek artifact retirement | retire after Phase C smoke test passes. |
+
+---
+
+## Status
+
+- [x] Stage A running (job 1058163, ~1.5 days remaining)
+- [ ] B1 prompt drafted (`judge_per_trace.txt`) — explicit `<objN>` verification
+- [ ] B2 prompt drafted (`scene_description.txt`) — enumerates grounded objects
+- [ ] `qwen_judge.py` implemented (race-safe consumer + B1 batch + B2 per-QA)
+- [ ] `pretrain_model_11.sh` SLURM wrapper
+- [ ] Stage B smoke test (10 QAs)
+- [ ] Stage B production launch (concurrent with A)
+- [ ] C1 prompt drafted (`deepseek_polish.txt`)
+- [ ] C2 prompt drafted (`deepseek_rederive.txt`)
+- [ ] `deepseek_polish.py` implemented
+- [ ] `pretrain_model_12.sh` SLURM wrapper
+- [ ] Phase C smoke test
+- [ ] Phase C production launch (queued after B)
+- [ ] `cot_enrichment.ipynb` updated for new schema
+- [ ] Stage D — SFT formatter + gates
