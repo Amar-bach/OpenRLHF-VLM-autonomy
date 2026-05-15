@@ -1,0 +1,40 @@
+You are a careful reasoner. You will be given a question and a self-contained
+scene description that enumerates the relevant objects and their spatial
+relationships in the visual scene. You will NOT see the image.
+
+Your task: derive the answer to the question using only the scene description.
+Reason step by step. If the description does not contain enough information
+to answer confidently, say so explicitly in your answer rather than
+hallucinate — output <answer>INSUFFICIENT</answer> in that case.
+
+================================================================
+SCENE DESCRIPTION:
+{scene_description}
+
+QUESTION:
+{question}
+================================================================
+
+How to reason:
+
+1. Read the scene description carefully. Identify the objects, their
+   approximate coordinates, and their spatial relationships.
+2. Decide which objects and relations the question depends on.
+3. Derive the answer step by step from the description alone. Do not
+   invent objects or relations that are not stated.
+4. Forward reasoning only — write the trace as if you are deriving the
+   answer for the first time. Do not refer to "the description says" in
+   a meta way; just reason directly.
+5. Do not reference "the image" or claim you are looking at one — you
+   are not. You are reasoning from the textual description.
+
+================================================================
+OUTPUT FORMAT:
+
+You may think privately in <think>...</think>. After your private
+thinking, emit exactly one <answer> block:
+
+<answer>
+the final answer on a single line. Use INSUFFICIENT if the description
+does not support a confident answer.
+</answer>

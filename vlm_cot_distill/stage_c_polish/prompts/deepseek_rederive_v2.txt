@@ -1,0 +1,11 @@
+{scene_description}
+
+Question: {question}
+
+Think step by step, using evidence and first-principles spatial
+reasoning. Cite specific objects and coordinates from the text above.
+
+After your reasoning, emit:
+<answer>
+the final answer on a single line.
+</answer>

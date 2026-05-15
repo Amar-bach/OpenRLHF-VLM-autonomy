@@ -26,6 +26,7 @@ from PIL import Image
 
 N_SAMPLES = 16
 JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+BARE_JSON_RE  = re.compile(r"(\{[^{}]*\"hallucination\"[^{}]*\})", re.DOTALL)
 
 
 def load_processed_ids(out_path: Path) -> set:
@@ -95,9 +96,13 @@ def render_b2(template, winner, gold, question):
 
 
 def parse_b1(text):
-    """Strict: reject if any score is missing, non-int, or out of [1,5].
-    answer_correctness is computed deterministically post-hoc, NOT from the judge."""
-    m = JSON_BLOCK_RE.search(text)
+    """Reject if any score is missing or out of [1,5]. Accept fenced ```json
+    block OR a bare {...} containing 'hallucination'. Coerce digit-strings
+    (e.g. "4") to int. answer_correctness is computed deterministically
+    post-hoc, NOT from the judge."""
+    if not text:
+        return None
+    m = JSON_BLOCK_RE.search(text) or BARE_JSON_RE.search(text)
     if not m:
         return None
     try:
@@ -109,6 +114,9 @@ def parse_b1(text):
         if not isinstance(sub, dict):
             return None
         s = sub.get("score")
+        if isinstance(s, str) and s.strip().isdigit():
+            s = int(s.strip())
+            sub["score"] = s
         if not isinstance(s, int) or not (1 <= s <= 5):
             return None
     return d
@@ -160,7 +168,12 @@ def main():
     ap.add_argument("--ids-per-batch", type=int, default=4,
                     help="ids per llm.chat call (each adds 16 B1 prompts)")
     ap.add_argument("--max-model-len", type=int, default=24576)
-    ap.add_argument("--max-output-tokens", type=int, default=8192)
+    ap.add_argument("--max-output-tokens", type=int, default=8192,
+                    help="Default for both B1 and B2 if -b1/-b2 not set")
+    ap.add_argument("--max-output-tokens-b1", type=int, default=None)
+    ap.add_argument("--max-output-tokens-b2", type=int, default=None)
+    ap.add_argument("--prompt-token-safety", type=int, default=256,
+                    help="Reserve this many tokens beyond max_output as headroom in oversize check")
     ap.add_argument("--temperature", type=float, default=0.6)
     ap.add_argument("--top-p", type=float, default=0.95)
     ap.add_argument("--top-k", type=int, default=40)
@@ -198,12 +211,24 @@ def main():
         enforce_eager=args.enforce_eager,
         limit_mm_per_prompt={"image": 1},
     )
-    sampling = SamplingParams(
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k,
-        max_tokens=args.max_output_tokens,
+    max_b1 = args.max_output_tokens_b1 or args.max_output_tokens
+    max_b2 = args.max_output_tokens_b2 or args.max_output_tokens
+    sampling_b1 = SamplingParams(
+        temperature=args.temperature, top_p=args.top_p, top_k=args.top_k,
+        max_tokens=max_b1,
     )
+    sampling_b2 = SamplingParams(
+        temperature=args.temperature, top_p=args.top_p, top_k=args.top_k,
+        max_tokens=max_b2,
+    )
+    tok = llm.get_tokenizer()
+    b1_budget = args.max_model_len - max_b1 - args.prompt_token_safety
+    b2_budget = args.max_model_len - max_b2 - args.prompt_token_safety
+
+    def _msg_token_len(msg):
+        # msg is the inner list-of-dicts (one chat); apply_chat_template needs the list.
+        text = tok.apply_chat_template(msg, tokenize=False, add_generation_prompt=True)
+        return len(tok.encode(text))
 
     total_done = 0
     while True:
@@ -243,18 +268,43 @@ def main():
                     }])
                     b1_meta.append((id_, sidx))
 
+            # Pre-flight oversize guard: drop B1 prompts that won't fit.
+            oversized_by_id = {id_: [False] * N_SAMPLES for id_, _ in batch}
+            kept_messages, kept_meta = [], []
+            for msg, (id_, sidx) in zip(b1_messages, b1_meta):
+                try:
+                    plen = _msg_token_len(msg)
+                except Exception as e:
+                    print(f"[WARN] tokenize failed id={id_} sidx={sidx}: {e}", flush=True)
+                    plen = b1_budget + 1  # treat as oversized
+                if plen > b1_budget:
+                    oversized_by_id[id_][sidx] = True
+                else:
+                    kept_messages.append(msg)
+                    kept_meta.append((id_, sidx))
+            n_dropped = sum(sum(v) for v in oversized_by_id.values())
+            if n_dropped:
+                print(f"[skip] dropped {n_dropped}/{len(b1_messages)} oversized B1 prompts", flush=True)
+
             t0 = time.time()
             b1_kwargs = {"chat_template_kwargs": {"enable_thinking": False}} if args.no_think_b1 else {}
-            b1_outs = llm.chat(b1_messages, sampling_params=sampling, use_tqdm=False, **b1_kwargs)
+            b1_chat_error = None
+            b1_outs = []
+            if kept_messages:
+                try:
+                    b1_outs = llm.chat(kept_messages, sampling_params=sampling_b1, use_tqdm=False, **b1_kwargs)
+                except Exception as e:
+                    b1_chat_error = repr(e)
+                    print(f"[ERROR] B1 llm.chat failed for batch_start={batch_start}: {b1_chat_error}", flush=True)
+                    b1_outs = []
             b1_dt = time.time() - t0
 
             scores_by_id = {id_: [None] * N_SAMPLES for id_, _ in batch}
             raw_by_id    = {id_: [None] * N_SAMPLES for id_, _ in batch}
             ok_by_id     = {id_: [False] * N_SAMPLES for id_, _ in batch}
-            # Need a quick lookup of (id_ -> samples) for ac computation
             samples_by_id = {id_: samples for id_, samples in batch}
             golds_by_id   = {id_: samples[0]["gt_answer"] for id_, samples in batch}
-            for (id_, sidx), out in zip(b1_meta, b1_outs):
+            for (id_, sidx), out in zip(kept_meta, b1_outs):
                 text = out.outputs[0].text
                 raw_by_id[id_][sidx] = text
                 d = parse_b1(text)
@@ -294,17 +344,49 @@ def main():
                     ],
                 }])
 
+            # Pre-flight oversize guard for B2 (one prompt per id).
+            b2_kept, b2_kept_idx, b2_oversized = [], [], set()
+            for i, msg in enumerate(b2_messages):
+                try:
+                    plen = _msg_token_len(msg)
+                except Exception:
+                    plen = b2_budget + 1
+                if plen > b2_budget:
+                    b2_oversized.add(i)
+                else:
+                    b2_kept.append(msg)
+                    b2_kept_idx.append(i)
+            if b2_oversized:
+                print(f"[skip] dropped {len(b2_oversized)}/{len(b2_messages)} oversized B2 prompts", flush=True)
+
             t1 = time.time()
             b2_kwargs = {"chat_template_kwargs": {"enable_thinking": False}} if args.no_think_b2 else {}
-            b2_outs = llm.chat(b2_messages, sampling_params=sampling, use_tqdm=False, **b2_kwargs)
+            b2_chat_error = None
+            b2_outs_kept = []
+            if b2_kept:
+                try:
+                    b2_outs_kept = llm.chat(b2_kept, sampling_params=sampling_b2, use_tqdm=False, **b2_kwargs)
+                except Exception as e:
+                    b2_chat_error = repr(e)
+                    print(f"[ERROR] B2 llm.chat failed for batch_start={batch_start}: {b2_chat_error}", flush=True)
+                    b2_outs_kept = []
             b2_dt = time.time() - t1
+            # Re-expand back to per-id list: outs[i] for kept ids, None for oversized
+            b2_outs = [None] * len(b2_messages)
+            for kept_pos, orig_i in enumerate(b2_kept_idx):
+                if kept_pos < len(b2_outs_kept):
+                    b2_outs[orig_i] = b2_outs_kept[kept_pos]
 
             # ---- emit ----
             ok_b1_total = 0
             ok_b2_total = 0
             for (id_, samples), b2_out in zip(batch, b2_outs):
-                raw_b2 = b2_out.outputs[0].text
-                description = strip_native_think(raw_b2)
+                if b2_out is None:
+                    raw_b2 = ""
+                    description = ""
+                else:
+                    raw_b2 = b2_out.outputs[0].text
+                    description = strip_native_think(raw_b2)
                 best_idx, best_total, all_failed = winners[id_]
                 rec = {
                     "id": id_,
@@ -315,6 +397,10 @@ def main():
                     "scores": scores_by_id[id_],
                     "parse_ok_b1": ok_by_id[id_],
                     "parse_ok_b2": bool(description),
+                    "oversized_b1": oversized_by_id[id_],
+                    "oversized_b2": id_ in {batch[i][0] for i in b2_oversized},
+                    "b1_chat_error": b1_chat_error,
+                    "b2_chat_error": b2_chat_error,
                     "raw_b1": raw_by_id[id_],
                     "raw_b2": raw_b2,
                 }

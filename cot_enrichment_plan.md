@@ -116,42 +116,71 @@ Vision-R1 modality-bridging artifact, used as input to Phase C.
 
 ## Phase C — DeepSeek-V4-Flash text-only polish
 
-**Queued after Stage B finishes** (or runs in race-safe streaming mode if Stage B
-output grows fast enough). DeepSeek is text-only, so it operates on the
-scene description rather than the image. Two parallel call variants per QA:
+**Current scope: C2 only (description-only rederivation).** Stage B finished
+2026-05-12 with 40,645 records; Phase C runs the C2 pass over those records
+to produce text-only SFT data. **C1 (winner-seeded polish) is parked as TODO**
+— see "TODO — C1" section at the bottom of this stage. Reason: leak risk
+(DeepSeek's `<think>` referencing the prior trace instead of refining it)
+needs prompt/audit work, and C2 is the harder signal to land first
+(modality-bridging self-containment test).
 
-### Call C1 — Trace polish (anchored on winner)
-**Inputs**: `question, gold_answer, scene_description, winning_trace, winning_answer`.
-**Task**: rewrite `winning_trace` into a clean forward-reasoning chain that
-references grounded objects/coords from `scene_description` instead of
-appealing to "the image". Output `<reasoning>...</reasoning><answer>...</answer>`.
-**Goal**: a polished image-anchored CoT that the student model learns to
-imitate when conditioned on the image.
+DeepSeek is text-only, so it operates on the scene description rather than
+the image. Originally specced as two parallel call variants per QA:
 
-### Call C2 — Trace rederive (description-only)
-**Inputs**: `question, gold_answer, scene_description` (NO trace).
-**Task**: derive a forward-reasoning chain that lands on the gold answer
-using only the scene description — proves that the description is
-self-sufficient. Output `<reasoning>...</reasoning><answer>...</answer>`.
-**Goal**: text-only CoT for modality-bridged training.
+**Key design rule — gold answer is NEVER shown to DeepSeek in either call.**
+DeepSeek must derive the answer itself. We then check `derived_answer ≈ gold`
+deterministically (`compute_ac` reused from Stage B). This guarantees forward
+reasoning by construction (no possible peek) and turns the lands-on-gold
+check into a real signal of trace honesty.
 
-If C2 cannot land on gold from description alone, the description is
-insufficient — flag the QA, do not include in text-only SFT split.
+DeepSeek-V4-Flash is a thinking model: it natively emits
+`<think>...reasoning...</think>` followed by free text. We treat the
+content of `<think>...</think>` as the trace and ask only for an
+`<answer>` block in the prompt. No `<reasoning>` tag is requested
+(would be redundant and the model usually ignores it anyway).
 
-### Per-QA Phase C output record
+### Call C1 — Image-anchored trace (winner-seeded) — TODO, deferred
+See "TODO — C1" at the end of this stage. Originally specced as:
+inputs `question, scene_description, winning_trace, winning_grounding`,
+task to derive answer using description, trace as hint with verify-don't-copy
+framing. Deferred for leak-risk mitigation (DeepSeek may reference the
+seed trace meta-style instead of refining it).
+
+### Call C2 — Description-only trace (ACTIVE)
+**Inputs**: `question, scene_description`. **No gold answer, no trace.**
+**Task**: derive the answer using only the scene description. If the
+description is insufficient, the model is instructed to say so rather
+than hallucinate — that fails the gate honestly.
+**Output**: `<answer>...</answer>`; trace harvested from native `<think>`.
+**Used for**: text-only SFT split (Stage D2).
+
+### Outcome matrix per id
+| C1 lands on gold | C2 lands on gold | Action |
+|---|---|---|
+| ✓ | ✓ | Both SFT splits emitted |
+| ✓ | ✗ | Image-grounded only (description was insufficient) |
+| ✗ | ✓ | Text-only only (winning trace was misleading) |
+| ✗ | ✗ | Drop |
+
+### Per-QA Phase C output record (trimmed)
 ```json
 {
   "id": "<stage-A id>",
-  "polished_trace":   "<C1 reasoning, image-anchored>",
-  "polished_answer":  "<C1 final answer>",
-  "rederived_trace":  "<C2 reasoning, description-only>",
-  "rederived_answer": "<C2 final answer>",
+  "c1_think":         "<content of native <think>...</think> in C1 output>",
+  "c1_answer":        "<C1 derived answer>",
   "c1_lands_on_gold": <bool>,
+  "c2_think":         "<content of native <think>...</think> in C2 output>",
+  "c2_answer":        "<C2 derived answer>",
   "c2_lands_on_gold": <bool>,
-  "raw_c1": "...",
-  "raw_c2": "..."
+  "raw_c1":           "<full DeepSeek output for C1>",
+  "raw_c2":           "<full DeepSeek output for C2>"
 }
 ```
+
+Skipped ids (Stage B `parse_ok_b2=False`, `all_b1_failed=True`, or empty
+`scene_description`) are not written. Empty `c1_think` + non-empty
+`raw_c1` indicates a parse failure on a successful chat call. Empty both
+indicates an oversize-skip or vLLM chat error (root cause in SLURM log).
 
 ---
 
@@ -162,7 +191,7 @@ For each QA where the gates pass, emit two SFT records (independent splits):
 ### D1 — Vision-grounded split (image-conditioned student)
 ```
 user:      <image> + question
-assistant: <reasoning> {polished_trace} </reasoning> <answer> {polished_answer} </answer>
+assistant: <reasoning> {c1_think} </reasoning> <answer> {c1_answer} </answer>
 ```
 **Gate**: `c1_lands_on_gold AND best_score.answer_correctness == 1
        AND best_score.hallucination >= 4
@@ -172,7 +201,7 @@ assistant: <reasoning> {polished_trace} </reasoning> <answer> {polished_answer} 
 ### D2 — Text-only split (modality-bridged student)
 ```
 user:      {scene_description} + question
-assistant: <reasoning> {rederived_trace} </reasoning> <answer> {rederived_answer} </answer>
+assistant: <reasoning> {c2_think} </reasoning> <answer> {c2_answer} </answer>
 ```
 **Gate**: `c2_lands_on_gold AND parse_ok_b2 AND best_score.visual_grounding >= 4`
 (visual_grounding gate ensures the description was built from accurate grounding.)
@@ -199,7 +228,8 @@ Updated for new schema:
 |---|---|---|---|
 | A (in-flight) | 41k × 16 = 656k | 4×H200 sxm5 (1058163) | ~1.5 days remaining |
 | B1 + B2 | 41k × 17 = 697k | second 4×H200 sxm5 | ~3.5 days, concurrent with A |
-| C1 + C2 | 41k × 2 = 82k | DeepSeek-V4-Flash 4×H200 sxm5 | ~1–1.5 days, queued after B |
+| C2 only (active) | 40,645 × 1 = 40.6k | DeepSeek-V4-Flash 4×H200 sxm5 | ~0.5–1 day |
+| C1 (deferred TODO) | 40,645 × 1 = 40.6k | DeepSeek-V4-Flash 4×H200 sxm5 | future pass |
 
 **Total**: ~5 days from now if Stages A/B run concurrent and C queues after B.
 
@@ -279,11 +309,10 @@ New SLURM scripts:
 - [ ] `pretrain_model_11.sh` SLURM wrapper
 - [ ] Stage B smoke test (10 QAs)
 - [ ] Stage B production launch (concurrent with A)
-- [ ] C1 prompt drafted (`deepseek_polish.txt`)
-- [ ] C2 prompt drafted (`deepseek_rederive.txt`)
-- [ ] `deepseek_polish.py` implemented
-- [ ] `pretrain_model_12.sh` SLURM wrapper
-- [ ] Phase C smoke test
-- [ ] Phase C production launch (queued after B)
+- [x] C2 prompt drafted (`stage_c_polish/prompts/deepseek_rederive.txt`)
+- [x] `deepseek_polish.py` implemented (C2-only)
+- [x] `pretrain_model_12.sh` SLURM wrapper
+- [ ] Phase C (C2) production launch — 40,645 ids
+- [ ] **TODO — C1**: draft `deepseek_polish.txt`, extend `deepseek_polish.py` with C1 path, add leak-detector flag, audit. Pick up after C2 results are in.
 - [ ] `cot_enrichment.ipynb` updated for new schema
 - [ ] Stage D — SFT formatter + gates
